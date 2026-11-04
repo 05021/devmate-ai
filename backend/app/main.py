@@ -89,9 +89,19 @@ def create_app() -> FastAPI:
         inspector = inspect(engine)
         if "users" in inspector.get_table_names():
             columns = {column["name"] for column in inspector.get_columns("users")}
-            if "role" not in columns:
-                with engine.begin() as connection:
+            with engine.begin() as connection:
+                if "role" not in columns:
                     connection.execute(text("ALTER TABLE users ADD COLUMN role VARCHAR(80) DEFAULT 'owner'"))
+                if "email" not in columns:
+                    connection.execute(text("ALTER TABLE users ADD COLUMN email VARCHAR(320)"))
+                if "username" not in columns:
+                    connection.execute(text("ALTER TABLE users ADD COLUMN username VARCHAR(80)"))
+                if "password_hash" not in columns:
+                    connection.execute(text("ALTER TABLE users ADD COLUMN password_hash VARCHAR(200)"))
+                if "public_code" not in columns:
+                    connection.execute(text("ALTER TABLE users ADD COLUMN public_code VARCHAR(40)"))
+                if "last_active_team_id" not in columns:
+                    connection.execute(text("ALTER TABLE users ADD COLUMN last_active_team_id UUID"))
         if "repositories" in inspector.get_table_names():
             columns = {column["name"] for column in inspector.get_columns("repositories")}
             with engine.begin() as connection:

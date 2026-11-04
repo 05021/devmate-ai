@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import JSON, BigInteger, DateTime, Float, ForeignKey, Integer, String, Text, Uuid, func
+from sqlalchemy import JSON, BigInteger, Boolean, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint, Uuid, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.session import Base
@@ -14,8 +14,50 @@ class User(Base):
     id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
     name: Mapped[str] = mapped_column(String(200), default="demo-user")
     role: Mapped[str] = mapped_column(String(80), default="owner", index=True)
+    # 认证字段（一期引入；存量演示账号保持空值，注册流程负责填充）
+    email: Mapped[str | None] = mapped_column(String(320), unique=True, index=True, nullable=True)
+    username: Mapped[str | None] = mapped_column(String(80), unique=True, index=True, nullable=True)
+    password_hash: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    # 个人编号：全局唯一、可搜索，仅用于邀请定位，不是加入团队的凭证
+    public_code: Mapped[str | None] = mapped_column(String(40), unique=True, index=True, nullable=True)
     github_token_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_active_team_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("teams.id", use_alter=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class Team(Base):
+    """团队 = 租户。所有业务数据通过 team_id 或 repo->team_id 归属到团队。"""
+
+    __tablename__ = "teams"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    name: Mapped[str] = mapped_column(String(200), index=True)
+    # 邀请码：6-12 位随机码，可撤销；空字符串表示关闭码加入，仅链接/搜索邀请
+    invite_code: Mapped[str | None] = mapped_column(String(12), unique=True, index=True, nullable=True)
+    allow_member_review: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    github_token_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"), nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    members: Mapped[list["TeamMember"]] = relationship(back_populates="team", cascade="all, delete-orphan")
+
+
+class TeamMember(Base):
+    """账号-团队成员关系；role 决定草稿提交权/审核权（owner/admin/member）。"""
+
+    __tablename__ = "team_members"
+    __table_args__ = (UniqueConstraint("team_id", "user_id", name="uq_team_members_team_user"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    team_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("teams.id"), index=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), index=True)
+    role: Mapped[str] = mapped_column(String(40), default="member", index=True)
+    invited_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    team: Mapped[Team] = relationship(back_populates="members")
+    user: Mapped[User] = relationship(foreign_keys=[user_id])
 
 
 class Repository(Base):
