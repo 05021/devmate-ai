@@ -45,6 +45,54 @@ def _cors_origin_regex() -> str | None:
     return r"^https?://(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$"
 
 
+def _migrate_legacy_data_to_default_team(db) -> None:
+    """多团队改造的存量迁移：无归属的仓库/工作区/评测挂到默认团队。
+
+    - 默认团队不存在时创建；若库中已有注册用户（含 email），其成为 Owner 成员
+    - 幂等：重复启动不会产生重复团队或重复挂载
+    """
+    from app.db.models import EvalRun, Repository, Team, TeamMember, User, Workspace
+
+    team = db.query(Team).order_by(Team.created_at.asc()).first()
+    if team is None:
+        owner_user = db.query(User).filter(User.email.isnot(None)).order_by(User.created_at.asc()).first()
+        if owner_user is None:
+            owner_user = db.query(User).order_by(User.created_at.asc()).first()
+        team = Team(name="默认团队", created_by=owner_user.id if owner_user else None)
+        db.add(team)
+        db.flush()
+        if owner_user is not None:
+            db.add(TeamMember(team_id=team.id, user_id=owner_user.id, role="owner", invited_by=owner_user.id))
+
+    migrated = 0
+    orphan_repos = db.query(Repository).filter(Repository.team_id.is_(None)).all()
+    for repo in orphan_repos:
+        repo.team_id = team.id
+        migrated += 1
+    orphan_workspaces = db.query(Workspace).filter(Workspace.team_id.is_(None)).all()
+    for workspace in orphan_workspaces:
+        workspace.team_id = team.id
+        migrated += 1
+    orphan_evals = db.query(EvalRun).filter(EvalRun.team_id.is_(None)).all()
+    for eval_run in orphan_evals:
+        eval_run.team_id = team.id
+        migrated += 1
+
+    # 注册用户若无任何团队，挂入默认团队，保证登录后立即可用
+    members_without_team = (
+        db.query(User)
+        .outerjoin(TeamMember, TeamMember.user_id == User.id)
+        .filter(User.email.isnot(None), TeamMember.id.is_(None))
+        .all()
+    )
+    for user in members_without_team:
+        db.add(TeamMember(team_id=team.id, user_id=user.id, role="member"))
+        migrated += 1
+
+    if migrated:
+        db.commit()
+
+
 def create_app() -> FastAPI:
     # 全局认证锁：除白名单（登录/注册/健康检查/文档/webhook）外全部要求会话
     app = FastAPI(title=settings.app_name, version="0.1.0", dependencies=[Depends(require_auth)])
@@ -125,6 +173,34 @@ def create_app() -> FastAPI:
                     connection.execute(text("ALTER TABLE repositories ADD COLUMN github_token_encrypted TEXT"))
                 if "sync_metadata" not in columns:
                     connection.execute(text("ALTER TABLE repositories ADD COLUMN sync_metadata JSON"))
+        for table_name, column_defs in {
+            "repositories": [("team_id", "UUID")],
+            "workspaces": [("team_id", "UUID")],
+            "eval_runs": [("team_id", "UUID")],
+        }.items():
+            if table_name in inspector.get_table_names():
+                columns = {column["name"] for column in inspector.get_columns(table_name)}
+                with engine.begin() as connection:
+                    for column_name, ddl in column_defs:
+                        if column_name not in columns:
+                            connection.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {ddl}"))
+        # 多团队改造：repositories.full_name 从全局唯一改为 (team_id, full_name) 唯一
+        # （两个团队可接入同一个 GitHub 仓库）；仅生产 PostgreSQL 存量库需要替换
+        if (
+            engine.dialect.name == "postgresql"
+            and "repositories" in inspector.get_table_names()
+            and "teams" in inspector.get_table_names()
+        ):
+            existing_columns = {column["name"] for column in inspector.get_columns("repositories")}
+            if "team_id" in existing_columns:
+                with engine.begin() as connection:
+                    connection.execute(text(
+                        "ALTER TABLE repositories DROP CONSTRAINT IF EXISTS repositories_full_name_key"
+                    ))
+                    connection.execute(text(
+                        "CREATE UNIQUE INDEX IF NOT EXISTS uq_repositories_team_full_name "
+                        "ON repositories (team_id, full_name)"
+                    ))
         if "workflow_runs" in inspector.get_table_names():
             columns = {column["name"] for column in inspector.get_columns("workflow_runs")}
             if "jobs" not in columns:
@@ -166,6 +242,7 @@ def create_app() -> FastAPI:
             backfill_all_default_conversations(db)
             if purge_legacy_code_documents(db):
                 db.commit()
+            _migrate_legacy_data_to_default_team(db)
         finally:
             db.close()
         app.state.rag_vector_status = milvus_runtime_status()

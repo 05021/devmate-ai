@@ -64,6 +64,8 @@ class Repository(Base):
     __tablename__ = "repositories"
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    # 团队归属（隔离锚点）：Issue/PR/CI/文档/评测等业务数据经由 repo 传导隔离
+    team_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("teams.id"), nullable=True, index=True)
     owner: Mapped[str] = mapped_column(String(200), index=True)
     name: Mapped[str] = mapped_column(String(200), index=True)
     full_name: Mapped[str] = mapped_column(String(400), unique=True, index=True)
@@ -90,6 +92,7 @@ class Workspace(Base):
     __tablename__ = "workspaces"
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    team_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("teams.id"), nullable=True, index=True)
     name: Mapped[str] = mapped_column(String(200), index=True)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     repo_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
@@ -542,6 +545,7 @@ class EvalRun(Base):
     __tablename__ = "eval_runs"
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    team_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("teams.id"), nullable=True, index=True)
     name: Mapped[str] = mapped_column(String(200))
     result_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
