@@ -80,6 +80,11 @@ class Settings(BaseSettings):
 
     token_encryption_key: str = "change-me-in-local-dev"
     demo_mode: bool = True
+
+    # 认证会话（一期：HttpOnly Cookie + JWT）
+    session_secret: str = "change-me-session-secret"
+    session_cookie_name: str = "dm_session"
+    session_expire_days: int = 7
     github_webhook_secret: str | None = None
     feishu_feedback_webhook_url: str | None = None
     feedback_trace_base_url: str | None = None

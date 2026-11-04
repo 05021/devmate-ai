@@ -1,12 +1,13 @@
 import asyncio
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy import inspect, text
 
 from app.api.routes import (
     action_drafts,
+    auth,
     chat,
     ci,
     code_graph,
@@ -22,9 +23,11 @@ from app.api.routes import (
     reports,
     search,
     skills,
+    teams,
     webhooks,
     workspaces,
 )
+from app.api.deps import require_auth
 from app.core.config import settings
 from app.db.models import Base
 from app.db.session import engine
@@ -43,7 +46,8 @@ def _cors_origin_regex() -> str | None:
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title=settings.app_name, version="0.1.0")
+    # 全局认证锁：除白名单（登录/注册/健康检查/文档/webhook）外全部要求会话
+    app = FastAPI(title=settings.app_name, version="0.1.0", dependencies=[Depends(require_auth)])
 
     @app.exception_handler(MilvusUnavailableError)
     async def milvus_unavailable_handler(_request, exc: MilvusUnavailableError) -> JSONResponse:
@@ -60,6 +64,8 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
+    app.include_router(auth.router, prefix="/api/auth", tags=["auth"])
+    app.include_router(teams.router, prefix="/api/teams", tags=["teams"])
     app.include_router(repos.router, prefix="/api/repos", tags=["repos"])
     app.include_router(conversations.router, prefix="/api/repos", tags=["conversations"])
     app.include_router(workspaces.router, prefix="/api/workspaces", tags=["workspaces"])
