@@ -171,6 +171,9 @@ async def confirm_action_draft(
         raise HTTPException(status_code=400, detail="只有待确认草稿可以执行")
     repo = db.get(Repository, draft.repo_id)
     ensure_repo_in_team(db, repo, not_found_detail="未找到仓库")
+    # 四眼原则：草稿提交人不能审核自己的草稿
+    if draft.created_by is not None and draft.created_by == user.id:
+        raise HTTPException(status_code=403, detail="四眼原则：不能审核自己提交的草稿")
     try:
         result = await _execute_github_draft(db, draft, repo)
         draft.status = "executed"

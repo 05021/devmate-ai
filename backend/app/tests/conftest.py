@@ -33,8 +33,10 @@ def bind_team_membership(db, *, role: str = "owner", user: User | None = None, t
     # 绑定脱离 session 的瞬态副本：避免后续 commit 使实例过期后
     # 上下文读取触发 DetachedInstanceError
     bound_member = TeamMember(team_id=team.id, user_id=user.id, role=role)
-    reset_token = deps._membership_cv.set(bound_member)
+    membership_token = deps._membership_cv.set(bound_member)
+    user_token = deps._user_cv.set(user)
     try:
         yield {"user": user, "team": team, "member": bound_member}
     finally:
-        deps._membership_cv.reset(reset_token)
+        deps._membership_cv.reset(membership_token)
+        deps._user_cv.reset(user_token)

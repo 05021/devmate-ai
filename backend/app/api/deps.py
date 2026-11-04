@@ -34,6 +34,7 @@ SESSION_COOKIE = "dm_session"
 
 # 请求作用域的团队成员关系缓存（require_auth 填充；白名单路径为 None）
 _membership_cv: ContextVar[TeamMember | None] = ContextVar("current_membership", default=None)
+_user_cv: ContextVar[User | None] = ContextVar("current_request_user", default=None)
 
 
 def _resolve_user(request: Request, db: Session) -> User | None:
@@ -92,11 +93,17 @@ def require_auth(request: Request, db: Session = Depends(get_db)) -> None:
         )
     membership = _resolve_membership(request, db, user)
     _membership_cv.set(membership)
+    _user_cv.set(user)
 
 
 def current_membership() -> TeamMember | None:
     """helper 内读取当前团队成员关系（require_auth 已解析；白名单路径为 None）。"""
     return _membership_cv.get()
+
+
+def current_user() -> User | None:
+    """helper 内读取当前登录用户（require_auth 已解析；白名单路径为 None）。"""
+    return _user_cv.get()
 
 
 def get_current_user(request: Request, db: Session = Depends(get_db)) -> User:

@@ -64,7 +64,11 @@ async def test_send_report_action_draft_confirm_records_execution() -> None:
             user=user,
         )
 
-        result = await confirm_action_draft(draft.id, db=db, user=user)
+        # 四眼原则：审核人不能是草稿提交人
+        reviewer = User(name="reviewer", role="owner")
+        db.add(reviewer)
+        db.flush()
+        result = await confirm_action_draft(draft.id, db=db, user=reviewer)
 
         assert result["draft"].status == "executed"
         assert result["draft"].execution_result["status"] == "recorded"
