@@ -3,6 +3,7 @@ from datetime import date, datetime, time, timezone
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
+from app.api.deps import ensure_repo_in_team
 from app.db.models import Issue, PullRequest, Repository, WorkflowRun
 from app.db.session import get_db
 from app.schemas.reports import WeeklyReportRequest, WeeklyReportResponse
@@ -43,8 +44,7 @@ def _pr_in_range(pr: PullRequest, start_at: datetime, end_at: datetime) -> bool:
 @router.post("/weekly", response_model=WeeklyReportResponse)
 async def weekly_report(payload: WeeklyReportRequest, db: Session = Depends(get_db)) -> dict:
     repo = db.get(Repository, payload.repo_id)
-    if repo is None:
-        raise HTTPException(status_code=404, detail="未找到仓库")
+    ensure_repo_in_team(db, repo, not_found_detail="未找到仓库")
     start_at, end_at = _range_bounds(payload.start_date, payload.end_date)
     issues = [
         item
@@ -107,6 +107,7 @@ async def weekly_report(payload: WeeklyReportRequest, db: Session = Depends(get_
 
 @router.post("/repo-health")
 async def repo_health(payload: WeeklyReportRequest, db: Session = Depends(get_db)) -> dict:
+    ensure_repo_in_team(db, db.get(Repository, payload.repo_id), not_found_detail="未找到仓库")
     open_issues = db.query(Issue).filter(Issue.repo_id == payload.repo_id, Issue.state == "open").count()
     open_prs = db.query(PullRequest).filter(PullRequest.repo_id == payload.repo_id, PullRequest.state == "open").count()
     failed_ci = db.query(WorkflowRun).filter(WorkflowRun.repo_id == payload.repo_id, WorkflowRun.conclusion == "failure").count()

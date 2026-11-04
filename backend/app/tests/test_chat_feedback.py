@@ -10,6 +10,7 @@ os.environ.setdefault("DATABASE_URL", "sqlite+pysqlite:///:memory:")
 from app.api.routes import feedback as feedback_routes
 from app.db.models import AgentRun, Base, ChatFeedback, ChatMessage, ChatSession, Conversation, Repository
 from app.schemas.feedback import ChatFeedbackCreate, ChatFeedbackReview
+from conftest import bind_team_membership
 
 
 def _db_session():
@@ -18,8 +19,13 @@ def _db_session():
     return sessionmaker(bind=engine)()
 
 
-def _feedback_fixture(db):
-    repo = Repository(owner="devmate", name="demo", full_name=f"devmate/demo-{uuid.uuid4().hex[:8]}")
+def _feedback_fixture(db, team_id=None):
+    repo = Repository(
+        team_id=team_id,
+        owner="devmate",
+        name="demo",
+        full_name=f"devmate/demo-{uuid.uuid4().hex[:8]}",
+    )
     db.add(repo)
     db.flush()
     conversation = Conversation(repo_id=repo.id, title="反馈测试")
@@ -78,85 +84,87 @@ def _feedback_fixture(db):
 @pytest.mark.asyncio
 async def test_negative_feedback_persists_notifies_and_traces(monkeypatch):
     db = _db_session()
-    repo, conversation, assistant_message, run_id = _feedback_fixture(db)
-    notifications = []
+    with bind_team_membership(db) as ctx:
+        repo, conversation, assistant_message, run_id = _feedback_fixture(db, team_id=ctx["team"].id)
+        notifications = []
 
-    async def fake_notification(**kwargs):
-        notifications.append(kwargs)
-        return "sent", None
+        async def fake_notification(**kwargs):
+            notifications.append(kwargs)
+            return "sent", None
 
-    monkeypatch.setattr(feedback_routes, "send_negative_feedback_notification", fake_notification)
-    result = await feedback_routes.create_feedback(
-        ChatFeedbackCreate(
-            repo_id=repo.id,
-            conversation_id=conversation.id,
-            assistant_message_id=assistant_message.id,
-            rating="unhelpful",
-            reason="inaccurate",
-            comment="真正失败的是类型检查。",
-        ),
-        db,
-    )
+        monkeypatch.setattr(feedback_routes, "send_negative_feedback_notification", fake_notification)
+        result = await feedback_routes.create_feedback(
+            ChatFeedbackCreate(
+                repo_id=repo.id,
+                conversation_id=conversation.id,
+                assistant_message_id=assistant_message.id,
+                rating="unhelpful",
+                reason="inaccurate",
+                comment="真正失败的是类型检查。",
+            ),
+            db,
+        )
 
-    assert result.run_id == run_id
-    assert result.notification_status == "sent"
-    assert result.review_status == "open"
-    assert len(notifications) == 1
+        assert result.run_id == run_id
+        assert result.notification_status == "sent"
+        assert result.review_status == "open"
+        assert len(notifications) == 1
 
-    metrics = await feedback_routes.feedback_metrics(repo.id, db)
-    assert metrics["assistant_messages"] == 1
-    assert metrics["unhelpful"] == 1
-    assert metrics["negative_feedback_rate"] == 1.0
-    assert metrics["reason_counts"] == {"inaccurate": 1}
+        metrics = await feedback_routes.feedback_metrics(repo.id, db)
+        assert metrics["assistant_messages"] == 1
+        assert metrics["unhelpful"] == 1
+        assert metrics["negative_feedback_rate"] == 1.0
+        assert metrics["reason_counts"] == {"inaccurate": 1}
 
-    trace = await feedback_routes.feedback_trace(run_id, db)
-    assert trace["trace_id"] == str(run_id)
-    assert trace["run"]["route"] == "ci_debug"
-    assert trace["messages"]["assistant"]["id"] == str(assistant_message.id)
-    assert trace["session"]["agent_events"][0]["tool_name"] == "ci_debug"
+        trace = await feedback_routes.feedback_trace(run_id, db)
+        assert trace["trace_id"] == str(run_id)
+        assert trace["run"]["route"] == "ci_debug"
+        assert trace["messages"]["assistant"]["id"] == str(assistant_message.id)
+        assert trace["session"]["agent_events"][0]["tool_name"] == "ci_debug"
 
-    reviewed = await feedback_routes.review_feedback(
-        result.id,
-        ChatFeedbackReview(review_status="resolved", review_note="已修复 Prompt"),
-        db,
-    )
-    assert reviewed.review_status == "resolved"
-    assert reviewed.reviewed_at is not None
+        reviewed = await feedback_routes.review_feedback(
+            result.id,
+            ChatFeedbackReview(review_status="resolved", review_note="已修复 Prompt"),
+            db,
+        )
+        assert reviewed.review_status == "resolved"
+        assert reviewed.reviewed_at is not None
 
 
 @pytest.mark.asyncio
 async def test_feedback_is_idempotent_per_assistant_message(monkeypatch):
     db = _db_session()
-    repo, conversation, assistant_message, _run_id = _feedback_fixture(db)
-    notifications = []
+    with bind_team_membership(db) as ctx:
+        repo, conversation, assistant_message, _run_id = _feedback_fixture(db, team_id=ctx["team"].id)
+        notifications = []
 
-    async def fake_notification(**kwargs):
-        notifications.append(kwargs)
-        return "sent", None
+        async def fake_notification(**kwargs):
+            notifications.append(kwargs)
+            return "sent", None
 
-    monkeypatch.setattr(feedback_routes, "send_negative_feedback_notification", fake_notification)
-    payload = ChatFeedbackCreate(
-        repo_id=repo.id,
-        conversation_id=conversation.id,
-        assistant_message_id=assistant_message.id,
-        rating="unhelpful",
-    )
-    first = await feedback_routes.create_feedback(payload, db)
-    second = await feedback_routes.create_feedback(payload, db)
-
-    assert first.id == second.id
-    assert db.query(ChatFeedback).count() == 1
-    assert len(notifications) == 1
-
-    helpful = await feedback_routes.create_feedback(
-        ChatFeedbackCreate(
+        monkeypatch.setattr(feedback_routes, "send_negative_feedback_notification", fake_notification)
+        payload = ChatFeedbackCreate(
             repo_id=repo.id,
             conversation_id=conversation.id,
             assistant_message_id=assistant_message.id,
-            rating="helpful",
-        ),
-        db,
-    )
-    assert helpful.rating == "helpful"
-    assert helpful.reason is None
-    assert helpful.notification_status == "not_applicable"
+            rating="unhelpful",
+        )
+        first = await feedback_routes.create_feedback(payload, db)
+        second = await feedback_routes.create_feedback(payload, db)
+
+        assert first.id == second.id
+        assert db.query(ChatFeedback).count() == 1
+        assert len(notifications) == 1
+
+        helpful = await feedback_routes.create_feedback(
+            ChatFeedbackCreate(
+                repo_id=repo.id,
+                conversation_id=conversation.id,
+                assistant_message_id=assistant_message.id,
+                rating="helpful",
+            ),
+            db,
+        )
+        assert helpful.rating == "helpful"
+        assert helpful.reason is None
+        assert helpful.notification_status == "not_applicable"

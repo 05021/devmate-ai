@@ -4,6 +4,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
+from app.api.deps import current_membership, ensure_repo_in_team
 from app.core.config import settings
 from app.core.security import decrypt_token
 from app.db.models import ActionDraft, AuditLog, Issue, PullRequest, Repository, User
@@ -69,8 +70,7 @@ async def create_action_draft(
     user: User = Depends(require_permission("draft:create")),
 ) -> ActionDraft:
     repo = db.get(Repository, payload.repo_id)
-    if repo is None:
-        raise HTTPException(status_code=404, detail="未找到仓库")
+    ensure_repo_in_team(db, repo, not_found_detail="未找到仓库")
     draft = ActionDraft(
         repo_id=payload.repo_id,
         draft_type=payload.draft_type,
@@ -104,7 +104,9 @@ async def list_action_drafts(
     db: Session = Depends(get_db),
     _user: User = Depends(require_permission("repo:read")),
 ) -> list[ActionDraft]:
-    query = db.query(ActionDraft)
+    query = db.query(ActionDraft).join(Repository, ActionDraft.repo_id == Repository.id).filter(
+        Repository.team_id == current_membership().team_id
+    )
     if repo_id:
         query = query.filter(ActionDraft.repo_id == repo_id)
     if status:
@@ -133,6 +135,7 @@ async def get_action_draft(
     draft = db.get(ActionDraft, draft_id)
     if draft is None:
         raise HTTPException(status_code=404, detail="未找到安全草稿")
+    ensure_repo_in_team(db, db.get(Repository, draft.repo_id), not_found_detail="未找到安全草稿")
     return draft
 
 
@@ -145,6 +148,7 @@ async def cancel_action_draft(
     draft = db.get(ActionDraft, draft_id)
     if draft is None:
         raise HTTPException(status_code=404, detail="未找到安全草稿")
+    ensure_repo_in_team(db, db.get(Repository, draft.repo_id), not_found_detail="未找到安全草稿")
     if draft.status != "pending_confirmation":
         raise HTTPException(status_code=400, detail="只有待确认草稿可以取消")
     draft.status = "cancelled"
@@ -166,8 +170,7 @@ async def confirm_action_draft(
     if draft.status != "pending_confirmation":
         raise HTTPException(status_code=400, detail="只有待确认草稿可以执行")
     repo = db.get(Repository, draft.repo_id)
-    if repo is None:
-        raise HTTPException(status_code=404, detail="未找到仓库")
+    ensure_repo_in_team(db, repo, not_found_detail="未找到仓库")
     try:
         result = await _execute_github_draft(db, draft, repo)
         draft.status = "executed"

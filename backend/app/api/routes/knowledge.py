@@ -9,6 +9,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from sqlalchemy.orm import Session
 
+from app.api.deps import ensure_repo_in_team
 from app.core.config import settings
 from app.db.models import Document, Repository
 from app.db.session import get_db
@@ -58,9 +59,7 @@ EMBEDDING_BATCH_SIZE = 64
 
 def _repo_or_404(db: Session, repo_id: uuid.UUID) -> Repository:
     repo = db.get(Repository, repo_id)
-    if repo is None:
-        raise HTTPException(status_code=404, detail="未找到仓库")
-    return repo
+    return ensure_repo_in_team(db, repo, not_found_detail="未找到仓库")
 
 
 def _clip(text: str, limit: int = 360) -> str:

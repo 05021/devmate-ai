@@ -9,6 +9,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Qu
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from app.api.deps import ensure_repo_in_team
 from app.core.config import settings
 from app.db.models import (
     Document,
@@ -50,9 +51,9 @@ router = APIRouter()
 
 def _repo_or_404(db: Session, repo_id: uuid.UUID) -> Repository:
     repo = db.get(Repository, repo_id)
-    if repo is None or repo.provider == "knowledge_base":
+    if repo is not None and repo.provider == "knowledge_base":
         raise HTTPException(status_code=404, detail="未找到仓库")
-    return repo
+    return ensure_repo_in_team(db, repo, not_found_detail="未找到仓库")
 
 
 def _safe_filename(filename: str) -> str:

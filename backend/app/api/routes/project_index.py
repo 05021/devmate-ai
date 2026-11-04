@@ -3,6 +3,7 @@ import uuid
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from sqlalchemy.orm import Session
 
+from app.api.deps import ensure_repo_in_team
 from app.db.models import Repository
 from app.db.session import get_db
 from app.schemas.project_index import (
@@ -23,9 +24,7 @@ router = APIRouter()
 
 def _repo_or_404(db: Session, repo_id: uuid.UUID) -> Repository:
     repo = db.get(Repository, repo_id)
-    if repo is None:
-        raise HTTPException(status_code=404, detail="未找到仓库")
-    return repo
+    return ensure_repo_in_team(db, repo, not_found_detail="未找到仓库")
 
 
 @router.get("/{repo_id}/memory-index/state", response_model=ProjectIndexStateResponse)

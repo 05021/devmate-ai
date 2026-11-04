@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
+from app.api.deps import ensure_repo_in_team
 from app.db.models import CodeRelation, CodeSymbol, PullRequest, Repository, User
 from app.db.session import get_db
 from app.schemas.code_graph import CodeGraphSearchResponse, CodeSymbolResponse
@@ -22,8 +23,7 @@ async def rebuild_code_graph(
     _user: User = Depends(require_permission("repo:read")),
 ) -> dict:
     repo = db.get(Repository, repo_id)
-    if repo is None:
-        raise HTTPException(status_code=404, detail="未找到仓库")
+    ensure_repo_in_team(db, repo, not_found_detail="未找到仓库")
     symbol_count = await sync_repository_code_analysis(db, repo)
     return {"repo_id": str(repo.id), "indexed_symbols": symbol_count}
 
@@ -38,6 +38,7 @@ async def list_code_symbols(
     db: Session = Depends(get_db),
     _user: User = Depends(require_permission("repo:read")),
 ) -> list[CodeSymbol]:
+    ensure_repo_in_team(db, db.get(Repository, repo_id), not_found_detail="未找到仓库")
     query = db.query(CodeSymbol).filter(CodeSymbol.repo_id == repo_id)
     if path:
         query = query.filter(CodeSymbol.path.contains(path))
@@ -59,8 +60,7 @@ async def search_code_graph(
     _user: User = Depends(require_permission("repo:read")),
 ) -> dict:
     repo = db.get(Repository, repo_id)
-    if repo is None:
-        raise HTTPException(status_code=404, detail="未找到仓库")
+    ensure_repo_in_team(db, repo, not_found_detail="未找到仓库")
     text = q.strip()
     query = db.query(CodeSymbol).filter(CodeSymbol.repo_id == repo_id)
     if pr_id:

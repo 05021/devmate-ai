@@ -9,6 +9,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy import or_
 from sqlalchemy.orm import Session, selectinload
 
+from app.api.deps import ensure_repo_in_team
 from app.db.models import AnalysisResult, CodeRelation, CodeSymbol, Conversation, Document, PullRequest, Repository, WorkflowRun
 from app.db.session import get_db
 from app.schemas.ci import CIAnalysisResponse, WorkflowRunResponse
@@ -459,6 +460,11 @@ async def _ci_analysis_sse(run_id: UUID, conversation_id: UUID | None, db: Sessi
     if run is None:
         yield _encode_sse("error", {"message": "未找到 workflow 运行"})
         return
+    try:
+        ensure_repo_in_team(db, db.get(Repository, run.repo_id), not_found_detail="未找到 workflow 运行")
+    except HTTPException as exc:
+        yield _encode_sse("error", {"message": str(exc.detail)})
+        return
     agent = CIDebugAgent()
     payload = _workflow_payload(run)
     plan = _ci_plan()
@@ -497,6 +503,7 @@ async def _ci_analysis_sse(run_id: UUID, conversation_id: UUID | None, db: Sessi
 
 @router.get("/repos/{repo_id}/workflow-runs", response_model=list[WorkflowRunResponse])
 async def list_workflow_runs(repo_id: UUID, db: Session = Depends(get_db)) -> list[WorkflowRun]:
+    ensure_repo_in_team(db, db.get(Repository, repo_id), not_found_detail="未找到仓库")
     return db.query(WorkflowRun).filter(WorkflowRun.repo_id == repo_id).order_by(WorkflowRun.created_at.desc()).all()
 
 
@@ -505,6 +512,7 @@ async def get_workflow_run(run_id: UUID, db: Session = Depends(get_db)) -> Workf
     run = db.get(WorkflowRun, run_id)
     if run is None:
         raise HTTPException(status_code=404, detail="未找到 workflow 运行")
+    ensure_repo_in_team(db, db.get(Repository, run.repo_id), not_found_detail="未找到 workflow 运行")
     return run
 
 
@@ -513,6 +521,7 @@ async def get_failed_jobs(run_id: UUID, db: Session = Depends(get_db)) -> dict:
     run = db.get(WorkflowRun, run_id)
     if run is None:
         raise HTTPException(status_code=404, detail="未找到 workflow 运行")
+    ensure_repo_in_team(db, db.get(Repository, run.repo_id), not_found_detail="未找到 workflow 运行")
     failed_jobs = [
         {
             **job,
@@ -534,6 +543,7 @@ async def analyze_workflow_run(
     run = db.get(WorkflowRun, run_id)
     if run is None:
         raise HTTPException(status_code=404, detail="未找到 workflow 运行")
+    ensure_repo_in_team(db, db.get(Repository, run.repo_id), not_found_detail="未找到 workflow 运行")
     agent = CIDebugAgent()
     snapshot = _prepare_ci_pr_snapshot(db, run, enabled=use_pr_snapshot)
     _query, context, counts = _build_ci_analysis_context(db, run, conversation_id)

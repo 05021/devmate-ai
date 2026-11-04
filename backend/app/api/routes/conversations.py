@@ -1,9 +1,10 @@
 import uuid
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
+from app.api.deps import TeamScope, ensure_repo_in_team
 from app.db.models import Repository
 from app.db.session import get_db
 from app.schemas.conversations import ConversationCreateRequest, ConversationResponse
@@ -12,16 +13,14 @@ from app.services.conversations import create_conversation, delete_conversation,
 router = APIRouter()
 
 
-def _repo_or_404(db: Session, repo_id: uuid.UUID) -> Repository:
+def _repo_or_404(db: Session, repo_id: uuid.UUID, membership) -> Repository:
     repo = db.get(Repository, repo_id)
-    if repo is None:
-        raise HTTPException(status_code=404, detail="未找到仓库")
-    return repo
+    return ensure_repo_in_team(db, repo, membership, not_found_detail="未找到仓库")
 
 
 @router.get("/{repo_id}/conversations", response_model=list[ConversationResponse])
-async def get_conversations(repo_id: uuid.UUID, db: Session = Depends(get_db)) -> list[Any]:
-    _repo_or_404(db, repo_id)
+async def get_conversations(repo_id: uuid.UUID, membership: TeamScope, db: Session = Depends(get_db)) -> list[Any]:
+    _repo_or_404(db, repo_id, membership)
     conversations = list_conversations(db, repo_id)
     db.commit()
     return conversations
@@ -30,10 +29,11 @@ async def get_conversations(repo_id: uuid.UUID, db: Session = Depends(get_db)) -
 @router.post("/{repo_id}/conversations", response_model=ConversationResponse)
 async def add_conversation(
     repo_id: uuid.UUID,
+    membership: TeamScope,
     payload: ConversationCreateRequest | None = None,
     db: Session = Depends(get_db),
 ) -> Any:
-    _repo_or_404(db, repo_id)
+    _repo_or_404(db, repo_id, membership)
     conversation = create_conversation(db, repo_id, payload.title if payload else None)
     db.commit()
     db.refresh(conversation)
@@ -44,9 +44,10 @@ async def add_conversation(
 async def remove_conversation(
     repo_id: uuid.UUID,
     conversation_id: uuid.UUID,
+    membership: TeamScope,
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    _repo_or_404(db, repo_id)
+    _repo_or_404(db, repo_id, membership)
     replacement = delete_conversation(db, repo_id, conversation_id)
     conversations = list_conversations(db, repo_id)
     db.commit()

@@ -12,6 +12,7 @@ from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app.db.models import ActionDraft, AgentRun, AgentTaskRun, AgentWorkflowRun, AnalysisResult, AuditLog, ChatFeedback, ChatMessage, ChatSession, CodeRelation, CodeSymbol, Conversation, ConversationMemory, Document, EvidenceItem, Issue, KnowledgeBaseConfig, KnowledgeGraphEdge, KnowledgeSourceDocument, MemoryCandidate, PRFile, PRReviewComment, ProjectIndexState, PullRequest, RecallEvent, Repository, RetrievalTestRun, ThreadMemory, WorkflowRun, Workspace
+from app.api.deps import TeamScope, ensure_repo_in_team
 from app.db.session import get_db
 from app.schemas.repos import RepoConnectRequest, RepoConnectResponse, RepoResponse, RepoSyncRequest, RepoSyncResponse
 from app.core.config import settings
@@ -155,7 +156,12 @@ def _clone_target_from_parent(raw_parent: str, repo_name: str) -> Path:
 
 
 @router.post("/connect", response_model=RepoConnectResponse)
-async def connect_repo(payload: RepoConnectRequest, background_tasks: BackgroundTasks, db: Session = Depends(get_db)) -> RepoConnectResponse:
+async def connect_repo(
+    payload: RepoConnectRequest,
+    background_tasks: BackgroundTasks,
+    membership: TeamScope,
+    db: Session = Depends(get_db),
+) -> RepoConnectResponse:
     local_path = _clean_text(payload.local_path)
     clone_parent_dir = _clean_text(payload.clone_parent_dir)
     owner = _clean_text(payload.owner)
@@ -206,9 +212,18 @@ async def connect_repo(payload: RepoConnectRequest, background_tasks: Background
                 "Added the repository in local cache mode; add a token or retry later for full GitHub sync."
             )
 
-    repo = db.query(Repository).filter(Repository.full_name == full_name).one_or_none()
+    repo = (
+        db.query(Repository)
+        .filter(Repository.team_id == membership.team_id, Repository.full_name == full_name)
+        .one_or_none()
+    )
     if repo is None:
-        repo = Repository(owner=owner or "", name=repo_name or "", full_name=full_name)
+        repo = Repository(
+            team_id=membership.team_id,
+            owner=owner or "",
+            name=repo_name or "",
+            full_name=full_name,
+        )
         db.add(repo)
     repo.owner = owner or repo.owner
     repo.name = repo_name or repo.name
@@ -265,10 +280,10 @@ async def connect_repo(payload: RepoConnectRequest, background_tasks: Background
 
 
 @router.get("", response_model=list[RepoResponse])
-async def list_repos(db: Session = Depends(get_db)) -> list[Repository]:
+async def list_repos(membership: TeamScope, db: Session = Depends(get_db)) -> list[Repository]:
     return (
         db.query(Repository)
-        .filter(Repository.provider != "knowledge_base")
+        .filter(Repository.team_id == membership.team_id, Repository.provider != "knowledge_base")
         .order_by(Repository.updated_at.desc())
         .all()
     )
@@ -280,11 +295,10 @@ async def sync_repo(
     payload: RepoSyncRequest,
     background_tasks: BackgroundTasks,
     response: Response,
+    membership: TeamScope,
     db: Session = Depends(get_db),
 ) -> RepoSyncResponse:
-    repo = db.get(Repository, repo_id)
-    if repo is None:
-        raise HTTPException(status_code=404, detail="未找到仓库")
+    repo = ensure_repo_in_team(db, db.get(Repository, repo_id), membership, not_found_detail="未找到仓库")
     result = await sync_repository(db, repo, payload)
     if result.status == "failed":
         response.status_code = 502
@@ -293,20 +307,16 @@ async def sync_repo(
 
 
 @router.post("/{repo_id}/select")
-async def select_repo(repo_id: UUID, db: Session = Depends(get_db)) -> dict:
-    repo = db.get(Repository, repo_id)
-    if repo is None:
-        raise HTTPException(status_code=404, detail="未找到仓库")
+async def select_repo(repo_id: UUID, membership: TeamScope, db: Session = Depends(get_db)) -> dict:
+    repo = ensure_repo_in_team(db, db.get(Repository, repo_id), membership, not_found_detail="未找到仓库")
     repo.updated_at = datetime.now(timezone.utc)
     db.commit()
     return {"repo_id": str(repo.id), "full_name": repo.full_name, "selected": True}
 
 
 @router.delete("/{repo_id}")
-async def delete_repo(repo_id: UUID, db: Session = Depends(get_db)) -> dict:
-    repo = db.get(Repository, repo_id)
-    if repo is None:
-        raise HTTPException(status_code=404, detail="未找到仓库")
+async def delete_repo(repo_id: UUID, membership: TeamScope, db: Session = Depends(get_db)) -> dict:
+    repo = ensure_repo_in_team(db, db.get(Repository, repo_id), membership, not_found_detail="未找到仓库")
 
     issue_ids = [item.id for item in db.query(Issue.id).filter(Issue.repo_id == repo.id).all()]
     pr_ids = [item.id for item in db.query(PullRequest.id).filter(PullRequest.repo_id == repo.id).all()]
@@ -453,10 +463,8 @@ async def delete_repo(repo_id: UUID, db: Session = Depends(get_db)) -> dict:
 
 
 @router.get("/{repo_id}/sync-status")
-async def sync_status(repo_id: UUID, db: Session = Depends(get_db)) -> dict:
-    repo = db.get(Repository, repo_id)
-    if repo is None:
-        raise HTTPException(status_code=404, detail="未找到仓库")
+async def sync_status(repo_id: UUID, membership: TeamScope, db: Session = Depends(get_db)) -> dict:
+    repo = ensure_repo_in_team(db, db.get(Repository, repo_id), membership, not_found_detail="未找到仓库")
     return {
         "repo_id": str(repo.id),
         "status": (repo.sync_metadata or {}).get("status", "unknown" if repo.last_sync_at else "not_started"),

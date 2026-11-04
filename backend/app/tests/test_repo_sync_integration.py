@@ -16,7 +16,10 @@ from sqlalchemy.pool import StaticPool
 
 from app.api.routes import repos
 from app.api.routes.chat import _build_conversation_tools, _build_engineering_workflow_runtime, _engineering_workflow_response, _persist_engineering_workflow
-from app.db.models import AgentWorkflowRun, Base, Issue, PRFile, PRReviewComment, Repository, WorkflowRun
+import uuid
+
+from app.api.deps import get_current_membership
+from app.db.models import AgentWorkflowRun, Base, Issue, PRFile, PRReviewComment, Repository, Team, TeamMember, WorkflowRun
 from app.db.session import get_db
 from app.schemas.repos import RepoSyncRequest
 from app.schemas.workflow import WorkflowClaim, WorkflowSpec, WorkflowTask
@@ -86,8 +89,19 @@ def database(github_server):
     engine = create_engine("sqlite+pysqlite:///:memory:", connect_args={"check_same_thread": False}, poolclass=StaticPool)
     Base.metadata.create_all(engine)
     with Session(engine) as db:
-        repo = Repository(owner="acme", name="demo", full_name="acme/demo", provider="github_compatible", api_base_url=github_server["url"])
-        db.add(repo)
+        team = Team(name="acme-team")
+        db.add(team)
+        db.flush()
+        member = TeamMember(team_id=team.id, user_id=uuid.uuid4(), role="owner")
+        repo = Repository(
+            team_id=team.id,
+            owner="acme",
+            name="demo",
+            full_name="acme/demo",
+            provider="github_compatible",
+            api_base_url=github_server["url"],
+        )
+        db.add_all([member, repo])
         db.commit()
         yield db, repo
     engine.dispose()
@@ -337,9 +351,11 @@ async def test_health_summary_and_workflow_gate_missing_or_incomplete_data(githu
 
 def test_sync_api_exposes_persisted_failure_and_complete_pagination(github_server, database, monkeypatch):
     db, repo = database
+    membership = db.query(TeamMember).one()
     app = FastAPI()
     app.include_router(repos.router, prefix="/api/repos")
     app.dependency_overrides[get_db] = lambda: db
+    app.dependency_overrides[get_current_membership] = lambda: membership
 
     async def no_code_analysis(*_args):
         pass

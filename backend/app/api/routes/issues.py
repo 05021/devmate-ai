@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
+from app.api.deps import ensure_repo_in_team
 from app.db.models import AnalysisResult, Conversation, Document, Issue, Repository
 from app.db.session import get_db
 from app.schemas.issues import IssueAnalysisResponse, IssueResponse
@@ -245,6 +246,11 @@ async def _issue_analysis_sse(issue_id: UUID, conversation_id: UUID | None, db: 
     if issue is None:
         yield _encode_sse("error", {"message": "未找到 Issue"})
         return
+    try:
+        ensure_repo_in_team(db, db.get(Repository, issue.repo_id), not_found_detail="未找到 Issue")
+    except HTTPException as exc:
+        yield _encode_sse("error", {"message": str(exc.detail)})
+        return
     agent = IssueAgent()
     payload = _issue_payload(issue)
     try:
@@ -269,6 +275,7 @@ async def _issue_analysis_sse(issue_id: UUID, conversation_id: UUID | None, db: 
 
 @router.get("/repos/{repo_id}/issues", response_model=list[IssueResponse])
 async def list_issues(repo_id: UUID, db: Session = Depends(get_db)) -> list[Issue]:
+    ensure_repo_in_team(db, db.get(Repository, repo_id), not_found_detail="未找到仓库")
     return db.query(Issue).filter(Issue.repo_id == repo_id).order_by(Issue.number.desc()).all()
 
 
@@ -277,6 +284,7 @@ async def get_issue(issue_id: UUID, db: Session = Depends(get_db)) -> Issue:
     issue = db.get(Issue, issue_id)
     if issue is None:
         raise HTTPException(status_code=404, detail="未找到 Issue")
+    ensure_repo_in_team(db, db.get(Repository, issue.repo_id), not_found_detail="未找到 Issue")
     return issue
 
 
@@ -289,6 +297,7 @@ async def analyze_issue(
     issue = db.get(Issue, issue_id)
     if issue is None:
         raise HTTPException(status_code=404, detail="未找到 Issue")
+    ensure_repo_in_team(db, db.get(Repository, issue.repo_id), not_found_detail="未找到 Issue")
     agent = IssueAgent()
     _query, context, counts = _build_issue_analysis_context(db, issue, conversation_id)
     result = await agent.run(_issue_payload(issue), context)
@@ -310,4 +319,5 @@ async def similar_issues(issue_id: UUID, db: Session = Depends(get_db)) -> list[
     issue = db.get(Issue, issue_id)
     if issue is None:
         raise HTTPException(status_code=404, detail="未找到 Issue")
+    ensure_repo_in_team(db, db.get(Repository, issue.repo_id), not_found_detail="未找到 Issue")
     return search_similar_documents(db, str(issue.repo_id), f"{issue.title}\n{issue.body or ''}", "issue", 5)

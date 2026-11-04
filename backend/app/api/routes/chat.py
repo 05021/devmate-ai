@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session, selectinload
 
+from app.api.deps import ensure_repo_in_team
 from app.core.config import settings
 from app.db.models import ActionDraft, AgentRun, AgentTaskRun, AgentWorkflowRun, ChatMessage, Conversation, Issue, PullRequest, Repository, WorkflowRun
 from app.db.session import get_db
@@ -181,9 +182,7 @@ async def chat_history(
 
 def _repo_or_404(db: Session, repo_id: uuid.UUID) -> Repository:
     repo = db.get(Repository, repo_id)
-    if repo is None:
-        raise HTTPException(status_code=404, detail="未找到指定仓库。")
-    return repo
+    return ensure_repo_in_team(db, repo, not_found_detail="未找到指定仓库。")
 
 
 def _client_context(value: dict[str, Any] | None) -> dict[str, Any]:

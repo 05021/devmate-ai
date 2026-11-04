@@ -10,6 +10,7 @@ from sqlalchemy.orm import sessionmaker
 
 from app.core.config import settings
 from app.db.models import Base, Conversation, Document, EvalRun, Repository
+from conftest import bind_team_membership
 from app.api.routes.evaluations import _eval_comparison, _issue_markdown
 from app.schemas.evals import EvalRunRequest
 from app.services.agents.chat_agent import ChatAgent
@@ -440,50 +441,51 @@ async def test_ragas_api_persists_summary_metrics(monkeypatch) -> None:
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)
     db = sessionmaker(bind=engine)()
-    repo = Repository(owner="local", name="api", full_name="local/api")
-    db.add(repo)
-    db.commit()
+    with bind_team_membership(db) as ctx:
+        repo = Repository(team_id=ctx["team"].id, owner="local", name="api", full_name="local/api")
+        db.add(repo)
+        db.commit()
 
-    async def fake_run(db_arg, repo_id, **kwargs):
-        assert db_arg is db
-        assert repo_id == str(repo.id)
-        assert kwargs["run_judge"] is True
-        await kwargs["progress_callback"](
-            {
-                "stage": "ragas",
-                "message": "scoring",
-                "completed_cases": 0,
-                "total_cases": 1,
+        async def fake_run(db_arg, repo_id, **kwargs):
+            assert db_arg is db
+            assert repo_id == str(repo.id)
+            assert kwargs["run_judge"] is True
+            await kwargs["progress_callback"](
+                {
+                    "stage": "ragas",
+                    "message": "scoring",
+                    "completed_cases": 0,
+                    "total_cases": 1,
+                }
+            )
+            return {
+                "kind": "chatagent_ragas",
+                "status": "failed",
+                "passed": False,
+                "summary_metrics": {"faithfulness": 0.62, "context_recall": 0.91},
+                "ragas": {"available": True, "metrics": {}},
+                "cases": [],
             }
+
+        monkeypatch.setattr(evaluation_routes, "run_rag_quality_eval", fake_run)
+        monkeypatch.setattr(evaluation_routes, "SessionLocal", lambda: db)
+        background_tasks = BackgroundTasks()
+        response = await evaluation_routes.run_rag_eval(
+            EvalRunRequest(name="api-ragas", repo_id=repo.id, run_judge=True),
+            background_tasks=background_tasks,
+            db=db,
+            _user=object(),
         )
-        return {
-            "kind": "chatagent_ragas",
-            "status": "failed",
-            "passed": False,
-            "summary_metrics": {"faithfulness": 0.62, "context_recall": 0.91},
-            "ragas": {"available": True, "metrics": {}},
-            "cases": [],
-        }
+        queued_history = await evaluation_routes.list_evals(db=db, _user=object())
 
-    monkeypatch.setattr(evaluation_routes, "run_rag_quality_eval", fake_run)
-    monkeypatch.setattr(evaluation_routes, "SessionLocal", lambda: db)
-    background_tasks = BackgroundTasks()
-    response = await evaluation_routes.run_rag_eval(
-        EvalRunRequest(name="api-ragas", repo_id=repo.id, run_judge=True),
-        background_tasks=background_tasks,
-        db=db,
-        _user=object(),
-    )
-    queued_history = await evaluation_routes.list_evals(db=db, _user=object())
+        assert response.status == "queued"
+        assert queued_history[0]["status"] == "queued"
 
-    assert response.status == "queued"
-    assert queued_history[0]["status"] == "queued"
+        await background_tasks()
+        history = await evaluation_routes.list_evals(db=db, _user=object())
+        detail = await evaluation_routes.get_eval(response.eval_id, db=db, _user=object())
 
-    await background_tasks()
-    history = await evaluation_routes.list_evals(db=db, _user=object())
-    detail = await evaluation_routes.get_eval(response.eval_id, db=db, _user=object())
-
-    assert db.query(EvalRun).count() == 1
-    assert history[0]["status"] == "failed"
-    assert history[0]["metrics"] == {"faithfulness": 0.62, "context_recall": 0.91}
-    assert detail["status"] == "failed"
+        assert db.query(EvalRun).count() == 1
+        assert history[0]["status"] == "failed"
+        assert history[0]["metrics"] == {"faithfulness": 0.62, "context_recall": 0.91}
+        assert detail["status"] == "failed"

@@ -11,6 +11,7 @@ from app.api.routes import rag as rag_routes
 from app.api.routes.chat import _client_context
 from app.api.routes.repos import list_repos
 from app.db.models import Base, Repository
+from conftest import bind_team_membership
 from app.mcp.memory_server import McpError, _resolve_repo
 from app.schemas.chat import ChatRequest
 from app.services.agents.chat_agent import ChatAgent
@@ -126,21 +127,28 @@ def test_milvus_search_applies_repo_filter_to_every_query() -> None:
 
 def test_rag_is_bound_to_real_repositories_and_has_no_virtual_creator() -> None:
     db = _db_session()
-    actual = Repository(owner="team", name="actual", full_name="team/actual")
-    legacy = Repository(
-        owner="knowledge",
-        name="legacy",
-        full_name="knowledge/legacy",
-        provider="knowledge_base",
-    )
-    db.add_all([actual, legacy])
-    db.commit()
+    with bind_team_membership(db) as ctx:
+        actual = Repository(
+            team_id=ctx["team"].id,
+            owner="team",
+            name="actual",
+            full_name="team/actual",
+        )
+        legacy = Repository(
+            team_id=ctx["team"].id,
+            owner="knowledge",
+            name="legacy",
+            full_name="knowledge/legacy",
+            provider="knowledge_base",
+        )
+        db.add_all([actual, legacy])
+        db.commit()
 
-    assert rag_routes._repo_or_404(db, actual.id).id == actual.id
-    with pytest.raises(HTTPException) as rejected:
-        rag_routes._repo_or_404(db, legacy.id)
-    assert rejected.value.status_code == 404
-    assert [repo.id for repo in asyncio.run(list_repos(db))] == [actual.id]
+        assert rag_routes._repo_or_404(db, actual.id).id == actual.id
+        with pytest.raises(HTTPException) as rejected:
+            rag_routes._repo_or_404(db, legacy.id)
+        assert rejected.value.status_code == 404
+        assert [repo.id for repo in asyncio.run(list_repos(ctx["member"], db))] == [actual.id]
 
     routes = {(route.path, frozenset(route.methods or set())) for route in rag_routes.router.routes}
     assert ("/repositories", frozenset({"GET"})) in routes

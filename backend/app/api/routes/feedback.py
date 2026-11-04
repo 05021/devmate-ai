@@ -5,6 +5,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
+from app.api.deps import ensure_repo_in_team
 from app.db.models import AgentRun, ChatFeedback, ChatMessage, ChatSession, Conversation, Repository
 from app.db.session import get_db
 from app.schemas.feedback import ChatFeedbackCreate, ChatFeedbackResponse, ChatFeedbackReview
@@ -153,6 +154,7 @@ async def list_feedback(
     limit: int = Query(default=200, ge=1, le=500),
     db: Session = Depends(get_db),
 ) -> list[ChatFeedback]:
+    ensure_repo_in_team(db, db.get(Repository, repo_id), not_found_detail="未找到仓库")
     query = db.query(ChatFeedback).filter(ChatFeedback.repo_id == repo_id)
     if conversation_id:
         query = query.filter(ChatFeedback.conversation_id == conversation_id)
@@ -165,6 +167,7 @@ async def create_feedback(payload: ChatFeedbackCreate, db: Session = Depends(get
     conversation = db.get(Conversation, payload.conversation_id)
     if repo is None or conversation is None or conversation.repo_id != repo.id:
         raise HTTPException(status_code=404, detail="未找到对应的项目会话")
+    ensure_repo_in_team(db, repo, not_found_detail="未找到对应的项目会话")
     message = _message_or_404(db, payload)
     run_id = _run_id_from_message(message)
     run = db.get(AgentRun, run_id) if run_id else None

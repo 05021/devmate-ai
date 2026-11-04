@@ -4,6 +4,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
+from app.api.deps import current_membership
 from app.db.models import Issue, PullRequest, Repository, User, WorkflowRun, Workspace
 from app.db.session import get_db
 from app.schemas.workspaces import MultiRepoReportRequest, MultiRepoReportResponse, WorkspaceCreateRequest, WorkspaceResponse
@@ -53,11 +54,20 @@ async def create_workspace(
     db: Session = Depends(get_db),
     user: User = Depends(require_permission("settings:manage")),
 ) -> Workspace:
-    known_repo_ids = {repo.id for repo in db.query(Repository).filter(Repository.id.in_(payload.repo_ids)).all()} if payload.repo_ids else set()
+    team_id = current_membership().team_id
+    known_repos = (
+        db.query(Repository)
+        .filter(Repository.team_id == team_id, Repository.id.in_(payload.repo_ids))
+        .all()
+        if payload.repo_ids
+        else []
+    )
+    known_repo_ids = {repo.id for repo in known_repos}
     missing = [str(repo_id) for repo_id in payload.repo_ids if repo_id not in known_repo_ids]
     if missing:
         raise HTTPException(status_code=404, detail=f"仓库不存在：{', '.join(missing)}")
     workspace = Workspace(
+        team_id=team_id,
         name=payload.name,
         description=payload.description,
         repo_ids=[str(repo_id) for repo_id in payload.repo_ids],
@@ -75,7 +85,12 @@ async def list_workspaces(
     db: Session = Depends(get_db),
     _user: User = Depends(require_permission("repo:read")),
 ) -> list[Workspace]:
-    return db.query(Workspace).order_by(Workspace.updated_at.desc()).all()
+    return (
+        db.query(Workspace)
+        .filter(Workspace.team_id == current_membership().team_id)
+        .order_by(Workspace.updated_at.desc())
+        .all()
+    )
 
 
 @router.post("/multi-repo-report", response_model=MultiRepoReportResponse)
@@ -88,7 +103,11 @@ async def multi_repo_report(
     if not repo_ids:
         raise HTTPException(status_code=400, detail="至少选择一个仓库")
     start_at, end_at = _bounds(payload)
-    repos = db.query(Repository).filter(Repository.id.in_(repo_ids)).all()
+    repos = (
+        db.query(Repository)
+        .filter(Repository.id.in_(repo_ids), Repository.team_id == current_membership().team_id)
+        .all()
+    )
     summaries = []
     totals = {"open_issues": 0, "open_prs": 0, "merged_prs": 0, "failed_ci": 0, "repos": len(repos)}
     for repo in repos:

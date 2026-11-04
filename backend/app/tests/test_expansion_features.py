@@ -20,6 +20,7 @@ from app.schemas.workspaces import MultiRepoReportRequest, WorkspaceCreateReques
 from app.services.code_analysis import _sync_code_graph
 from app.services.code_search import search_repository_code
 from app.services.rag.vector_store import reset_milvus_store_cache
+from conftest import bind_team_membership
 from app.services.worktree_manager import _sync_pr_snapshot_analysis, cleanup_pr_snapshots
 
 
@@ -36,8 +37,15 @@ def _user(db):
     return user
 
 
-def _repo(db, name: str = "demo") -> Repository:
-    repo = Repository(owner="local", name=name, full_name=f"local/{name}", checkout_mode="managed", clone_url=f"https://github.com/local/{name}.git")
+def _repo(db, name: str = "demo", team_id=None) -> Repository:
+    repo = Repository(
+        team_id=team_id,
+        owner="local",
+        name=name,
+        full_name=f"local/{name}",
+        checkout_mode="managed",
+        clone_url=f"https://github.com/local/{name}.git",
+    )
     db.add(repo)
     db.flush()
     return repo
@@ -46,20 +54,21 @@ def _repo(db, name: str = "demo") -> Repository:
 @pytest.mark.asyncio
 async def test_send_report_action_draft_confirm_records_execution() -> None:
     db = _db_session()
-    user = _user(db)
-    repo = _repo(db)
+    with bind_team_membership(db) as ctx:
+        user = _user(db)
+        repo = _repo(db, team_id=ctx["team"].id)
 
-    draft = await create_action_draft(
-        ActionDraftCreateRequest(repo_id=repo.id, draft_type="send_report", target_type="repository", title="Weekly report", content="Report body"),
-        db=db,
-        user=user,
-    )
+        draft = await create_action_draft(
+            ActionDraftCreateRequest(repo_id=repo.id, draft_type="send_report", target_type="repository", title="Weekly report", content="Report body"),
+            db=db,
+            user=user,
+        )
 
-    result = await confirm_action_draft(draft.id, db=db, user=user)
+        result = await confirm_action_draft(draft.id, db=db, user=user)
 
-    assert result["draft"].status == "executed"
-    assert result["draft"].execution_result["status"] == "recorded"
-    assert result["audit_id"]
+        assert result["draft"].status == "executed"
+        assert result["draft"].execution_result["status"] == "recorded"
+        assert result["audit_id"]
 
 
 @pytest.mark.asyncio
@@ -67,55 +76,57 @@ async def test_multi_repo_report_aggregates_workspace_repositories(monkeypatch) 
     monkeypatch.setattr(settings, "milvus_enabled", False)
     reset_milvus_store_cache()
     db = _db_session()
-    user = _user(db)
-    repo_a = _repo(db, "api")
-    repo_b = _repo(db, "web")
-    db.add(Issue(repo_id=repo_a.id, number=1, title="Fix auth", state="open", created_at=datetime.now(timezone.utc)))
-    db.add(PullRequest(repo_id=repo_b.id, number=2, title="UI update", state="open", created_at=datetime.now(timezone.utc)))
-    db.add(WorkflowRun(repo_id=repo_b.id, github_run_id=3, name="test", status="completed", conclusion="failure", created_at=datetime.now(timezone.utc)))
-    db.flush()
+    with bind_team_membership(db) as ctx:
+        user = _user(db)
+        repo_a = _repo(db, "api", team_id=ctx["team"].id)
+        repo_b = _repo(db, "web", team_id=ctx["team"].id)
+        db.add(Issue(repo_id=repo_a.id, number=1, title="Fix auth", state="open", created_at=datetime.now(timezone.utc)))
+        db.add(PullRequest(repo_id=repo_b.id, number=2, title="UI update", state="open", created_at=datetime.now(timezone.utc)))
+        db.add(WorkflowRun(repo_id=repo_b.id, github_run_id=3, name="test", status="completed", conclusion="failure", created_at=datetime.now(timezone.utc)))
+        db.flush()
 
-    workspace = await create_workspace(WorkspaceCreateRequest(name="team", repo_ids=[repo_a.id, repo_b.id]), db=db, user=user)
-    result = await multi_repo_report(
-        MultiRepoReportRequest(
-            workspace_id=workspace.id,
-            start_date=datetime.now(timezone.utc).date(),
-            end_date=datetime.now(timezone.utc).date(),
-        ),
-        db=db,
-        user=user,
-    )
+        workspace = await create_workspace(WorkspaceCreateRequest(name="team", repo_ids=[repo_a.id, repo_b.id]), db=db, user=user)
+        result = await multi_repo_report(
+            MultiRepoReportRequest(
+                workspace_id=workspace.id,
+                start_date=datetime.now(timezone.utc).date(),
+                end_date=datetime.now(timezone.utc).date(),
+            ),
+            db=db,
+            user=user,
+        )
 
-    assert result["metrics"]["repos"] == 2
-    assert result["metrics"]["open_issues"] == 1
-    assert result["metrics"]["open_prs"] == 1
-    assert result["metrics"]["failed_ci"] == 1
-    assert "多仓库研发周报" in result["report_markdown"]
+        assert result["metrics"]["repos"] == 2
+        assert result["metrics"]["open_issues"] == 1
+        assert result["metrics"]["open_prs"] == 1
+        assert result["metrics"]["failed_ci"] == 1
+        assert "多仓库研发周报" in result["report_markdown"]
 
 
 @pytest.mark.asyncio
 async def test_code_graph_indexes_symbols_and_relations(tmp_path) -> None:
     db = _db_session()
-    user = _user(db)
-    repo = _repo(db)
-    project = tmp_path / "repo"
-    project.mkdir()
-    (project / "service.py").write_text(
-        "from lib import helper\n\n"
-        "def handler():\n"
-        "    return helper()\n\n"
-        "class Worker:\n"
-        "    pass\n",
-        encoding="utf-8",
-    )
+    with bind_team_membership(db) as ctx:
+        user = _user(db)
+        repo = _repo(db, team_id=ctx["team"].id)
+        project = tmp_path / "repo"
+        project.mkdir()
+        (project / "service.py").write_text(
+            "from lib import helper\n\n"
+            "def handler():\n"
+            "    return helper()\n\n"
+            "class Worker:\n"
+            "    pass\n",
+            encoding="utf-8",
+        )
 
-    count = _sync_code_graph(db, repo, project, branch="main", commit_sha="abc123")
-    db.commit()
-    result = await search_code_graph(repo.id, q="handler", limit=20, db=db, _user=user)
+        count = _sync_code_graph(db, repo, project, branch="main", commit_sha="abc123")
+        db.commit()
+        result = await search_code_graph(repo.id, q="handler", limit=20, db=db, _user=user)
 
-    assert count == 2
-    assert result["symbols"][0].name == "handler"
-    assert any(item["relation_type"] == "calls" for item in result["relations"])
+        assert count == 2
+        assert result["symbols"][0].name == "handler"
+        assert any(item["relation_type"] == "calls" for item in result["relations"])
 
 
 def test_pr_snapshot_live_search_is_pr_scoped(tmp_path) -> None:

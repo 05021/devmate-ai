@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
+from app.api.deps import ensure_repo_in_team
 from app.db.models import Repository
 from app.db.session import get_db
 from app.schemas.search import SearchRequest, SearchResponse
@@ -12,8 +13,7 @@ router = APIRouter()
 @router.post("", response_model=SearchResponse)
 async def semantic_search(payload: SearchRequest, db: Session = Depends(get_db)) -> SearchResponse:
     repo = db.get(Repository, payload.repo_id)
-    if repo is None:
-        raise HTTPException(status_code=404, detail="未找到仓库")
+    ensure_repo_in_team(db, repo, not_found_detail="未找到仓库")
 
     filters = {
         "label": payload.label,

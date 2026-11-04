@@ -8,6 +8,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy import or_
 from sqlalchemy.orm import Session, selectinload
 
+from app.api.deps import ensure_repo_in_team
 from app.db.models import AnalysisResult, CodeRelation, CodeSymbol, Conversation, Document, PullRequest, Repository, WorkflowRun
 from app.db.session import get_db
 from app.schemas.pull_requests import PRAnalysisResponse, PullRequestResponse
@@ -416,6 +417,11 @@ async def _pr_analysis_sse(pr_id: UUID, conversation_id: UUID | None, db: Sessio
     if pr is None:
         yield _encode_sse("error", {"message": "未找到 PR"})
         return
+    try:
+        ensure_repo_in_team(db, db.get(Repository, pr.repo_id), not_found_detail="未找到 PR")
+    except HTTPException as exc:
+        yield _encode_sse("error", {"message": str(exc.detail)})
+        return
     agent = PRReviewAgent()
     payload = _pr_payload(pr)
     plan = _pr_review_plan()
@@ -452,6 +458,7 @@ async def _pr_analysis_sse(pr_id: UUID, conversation_id: UUID | None, db: Sessio
 
 @router.get("/repos/{repo_id}/pull-requests", response_model=list[PullRequestResponse])
 async def list_pull_requests(repo_id: UUID, db: Session = Depends(get_db)) -> list[PullRequest]:
+    ensure_repo_in_team(db, db.get(Repository, repo_id), not_found_detail="未找到仓库")
     return (
         db.query(PullRequest)
         .options(selectinload(PullRequest.files), selectinload(PullRequest.review_comments))
@@ -466,6 +473,7 @@ async def get_pull_request(pr_id: UUID, db: Session = Depends(get_db)) -> PullRe
     pr = db.query(PullRequest).options(selectinload(PullRequest.files), selectinload(PullRequest.review_comments)).filter(PullRequest.id == pr_id).one_or_none()
     if pr is None:
         raise HTTPException(status_code=404, detail="未找到 PR")
+    ensure_repo_in_team(db, db.get(Repository, pr.repo_id), not_found_detail="未找到 PR")
     return pr
 
 
@@ -480,6 +488,7 @@ async def analyze_pull_request(
     pr = db.query(PullRequest).options(selectinload(PullRequest.files), selectinload(PullRequest.review_comments)).filter(PullRequest.id == pr_id).one_or_none()
     if pr is None:
         raise HTTPException(status_code=404, detail="未找到 PR")
+    ensure_repo_in_team(db, db.get(Repository, pr.repo_id), not_found_detail="未找到 PR")
     agent = PRReviewAgent()
     snapshot_enabled = use_pr_snapshot if use_worktree is None else use_worktree
     snapshot = _prepare_pr_snapshot_context(db, pr, snapshot_enabled)
@@ -504,6 +513,7 @@ async def prepare_pull_request_snapshot(pr_id: UUID, db: Session = Depends(get_d
     pr = db.query(PullRequest).options(selectinload(PullRequest.files)).filter(PullRequest.id == pr_id).one_or_none()
     if pr is None:
         raise HTTPException(status_code=404, detail="未找到 PR")
+    ensure_repo_in_team(db, db.get(Repository, pr.repo_id), not_found_detail="未找到 PR")
     return _prepare_pr_snapshot_context(db, pr, enabled=True)
 
 
@@ -512,6 +522,7 @@ async def prepare_pull_request_worktree(pr_id: UUID, db: Session = Depends(get_d
     pr = db.query(PullRequest).options(selectinload(PullRequest.files)).filter(PullRequest.id == pr_id).one_or_none()
     if pr is None:
         raise HTTPException(status_code=404, detail="未找到 PR")
+    ensure_repo_in_team(db, db.get(Repository, pr.repo_id), not_found_detail="未找到 PR")
     return _prepare_pr_snapshot_context(db, pr, enabled=True)
 
 
@@ -522,8 +533,7 @@ async def cleanup_pull_request_snapshots(
     db: Session = Depends(get_db),
 ) -> dict:
     repo = db.get(Repository, repo_id)
-    if repo is None:
-        raise HTTPException(status_code=404, detail="未找到仓库")
+    ensure_repo_in_team(db, repo, not_found_detail="未找到仓库")
     return cleanup_pr_snapshots(db, repo, max_age_hours=max_age_hours)
 
 

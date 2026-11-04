@@ -8,6 +8,7 @@ from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker
 
 from app.api.routes import repos as repo_routes
+from conftest import bind_team_membership
 from app.db.models import (
     AgentRun,
     AgentTaskRun,
@@ -40,7 +41,14 @@ def _db_session():
 @pytest.mark.asyncio
 async def test_delete_repo_removes_all_conversation_and_workflow_dependencies(monkeypatch) -> None:
     db = _db_session()
-    repo = Repository(owner="devmate", name="delete-me", full_name=f"devmate/delete-{uuid.uuid4().hex[:8]}")
+    with bind_team_membership(db) as ctx:
+        repo = Repository(
+            team_id=ctx["team"].id,
+            owner="devmate",
+            name="delete-me",
+            full_name=f"devmate/delete-{uuid.uuid4().hex[:8]}",
+        )
+        member = ctx["member"]
     db.add(repo)
     db.flush()
 
@@ -128,7 +136,7 @@ async def test_delete_repo_removes_all_conversation_and_workflow_dependencies(mo
 
     monkeypatch.setattr(repo_routes, "delete_milvus_documents", fake_delete_milvus_documents)
 
-    result = await repo_routes.delete_repo(repo.id, db)
+    result = await repo_routes.delete_repo(repo.id, member, db)
 
     assert result["deleted"] is True
     assert result["cleanup"]["milvus_deleted"] is True

@@ -8,6 +8,7 @@ from uuid import UUID
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
+from app.api.deps import current_membership, ensure_repo_in_team
 from app.db.models import ActionDraft, EvalRun, Repository, User
 from app.db.session import SessionLocal, get_db
 from app.schemas.evals import EvalIssueDraftRequest, EvalRunRequest, EvalRunResponse
@@ -68,6 +69,17 @@ async def get_eval_suites(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
+def _eval_or_404(db: Session, eval_id) -> EvalRun:
+    """评测运行的团队隔离校验。"""
+    eval_run = db.get(EvalRun, eval_id)
+    membership = current_membership()
+    if membership is None:
+        raise HTTPException(status_code=403, detail="尚未加入任何团队，请先创建或加入团队")
+    if eval_run is None or eval_run.team_id != membership.team_id:
+        raise HTTPException(status_code=404, detail="未找到 Eval run")
+    return eval_run
+
+
 @router.post("/run", response_model=EvalRunResponse)
 async def run_eval(
     payload: EvalRunRequest,
@@ -75,7 +87,7 @@ async def run_eval(
     _user=Depends(require_permission("eval:read")),
 ) -> EvalRunResponse:
     result = await run_basic_eval(db, str(payload.repo_id) if payload.repo_id else None)
-    eval_run = EvalRun(name=payload.name, result_json=result)
+    eval_run = EvalRun(team_id=current_membership().team_id, name=payload.name, result_json=result)
     db.add(eval_run)
     db.commit()
     db.refresh(eval_run)
@@ -95,8 +107,7 @@ async def run_rag_eval(
 ) -> EvalRunResponse:
     if payload.repo_id is None:
         raise HTTPException(status_code=400, detail="RAG Eval 需要 repo_id")
-    if db.get(Repository, payload.repo_id) is None:
-        raise HTTPException(status_code=404, detail="未找到仓库")
+    ensure_repo_in_team(db, db.get(Repository, payload.repo_id), not_found_detail="未找到评测对应仓库")
     if payload.cases is not None and payload.suite_id:
         raise HTTPException(status_code=400, detail="cases 与 suite_id 不能同时提交")
     if payload.cases is not None:
@@ -127,7 +138,7 @@ async def run_rag_eval(
         repo_id=str(payload.repo_id),
         evaluation_set=evaluation_set,
     )
-    eval_run = EvalRun(name=payload.name or "rag_eval", result_json=result)
+    eval_run = EvalRun(team_id=current_membership().team_id, name=payload.name or "rag_eval", result_json=result)
     db.add(eval_run)
     db.commit()
     db.refresh(eval_run)
@@ -258,9 +269,7 @@ async def rescore_eval(
     db: Session = Depends(get_db),
     _user=Depends(require_permission("eval:read")),
 ) -> EvalRunResponse:
-    source = db.get(EvalRun, eval_id)
-    if source is None:
-        raise HTTPException(status_code=404, detail="未找到 Eval run")
+    source = _eval_or_404(db, eval_id)
     source_result = source.result_json or {}
     if not source_result.get("cases"):
         raise HTTPException(status_code=400, detail="原评测没有可用于重评分的逐题现场")
@@ -281,7 +290,7 @@ async def rescore_eval(
         evaluation_set=evaluation_set,
         rescore_of=str(eval_id),
     )
-    target = EvalRun(name=f"rescore-{source.name}", result_json=queued)
+    target = EvalRun(team_id=source.team_id, name=f"rescore-{source.name}", result_json=queued)
     db.add(target)
     db.commit()
     db.refresh(target)
@@ -425,10 +434,8 @@ async def compare_evals(
     db: Session = Depends(get_db),
     _user=Depends(require_permission("eval:read")),
 ) -> dict:
-    base = db.get(EvalRun, base_eval_id)
-    candidate = db.get(EvalRun, candidate_eval_id)
-    if base is None or candidate is None:
-        raise HTTPException(status_code=404, detail="未找到用于对比的 Eval run")
+    base = _eval_or_404(db, base_eval_id)
+    candidate = _eval_or_404(db, candidate_eval_id)
     return _eval_comparison(base, candidate)
 
 
@@ -499,16 +506,13 @@ async def create_eval_issue_draft(
     db: Session = Depends(get_db),
     user: User = Depends(require_permission("draft:create")),
 ) -> dict:
-    eval_run = db.get(EvalRun, eval_id)
-    if eval_run is None:
-        raise HTTPException(status_code=404, detail="未找到 Eval run")
+    eval_run = _eval_or_404(db, eval_id)
     result = eval_run.result_json or {}
     repo_id = (result.get("target") or {}).get("repo_id")
     if not repo_id:
         raise HTTPException(status_code=400, detail="该历史评测没有保存仓库信息，无法创建 Issue 草稿")
     repo = db.get(Repository, UUID(str(repo_id)))
-    if repo is None:
-        raise HTTPException(status_code=404, detail="未找到评测对应仓库")
+    ensure_repo_in_team(db, repo, not_found_detail="未找到评测对应仓库")
     suite_label = (result.get("evaluation_set") or {}).get("label") or "RAGAS"
     title = payload.title or f"RAG 质量回归：{suite_label} 未通过"
     draft = ActionDraft(
@@ -543,7 +547,13 @@ async def list_evals(
     db: Session = Depends(get_db),
     _user=Depends(require_permission("eval:read")),
 ) -> list[dict]:
-    rows = db.query(EvalRun).order_by(EvalRun.created_at.desc()).limit(100).all()
+    rows = (
+        db.query(EvalRun)
+        .filter(EvalRun.team_id == current_membership().team_id)
+        .order_by(EvalRun.created_at.desc())
+        .limit(100)
+        .all()
+    )
     if repo_id is not None:
         rows = [
             row
@@ -574,9 +584,7 @@ async def get_eval(
         eval_uuid = UUID(eval_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail="Eval id 无效") from exc
-    eval_run = db.get(EvalRun, eval_uuid)
-    if eval_run is None:
-        raise HTTPException(status_code=404, detail="未找到 Eval run")
+    eval_run = _eval_or_404(db, eval_uuid)
     result = eval_run.result_json or {}
     return {
         "eval_id": str(eval_run.id),
