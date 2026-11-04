@@ -1,0 +1,982 @@
+// DevMate AI workbench shared types / constants / utils (extracted from app/page.tsx)
+
+import type { ChatFeedbackRecord } from "@/components/feedback-controls";
+
+export function contextRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+}
+
+export function contextNumber(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+export function contextString(value: unknown): string {
+  return typeof value === "string" ? value : "";
+}
+
+export function contextStageLabel(stage: string): string {
+  if (stage === "warning") return "接近阈值";
+  if (stage === "auto_compact") return "自动压缩";
+  if (stage === "aggressive") return "强压缩";
+  if (stage === "manual_path") return "正式压缩";
+  return "正常";
+}
+
+export function contextReasonLabel(reason: string): string {
+  if (reason === "microcompact_sufficient") return "轻量压缩后已经恢复安全余量";
+  if (reason === "normal") return "当前上下文仍在安全区";
+  if (reason === "warning") return "已经接近阈值，但暂时不需要正式压缩";
+  if (reason === "not_enough_messages") return "历史消息不足，无法生成压缩摘要";
+  if (reason === "nothing_to_summarize") return "没有需要继续摘要的旧消息";
+  if (reason === "compacted") return "原始片段超过阈值，已生成摘要边界";
+  return reason;
+}
+
+export function classifyIssue(issue: Issue) {
+  const labels = (issue.labels ?? []).map((label) => label.toLowerCase());
+  const text = `${issue.title} ${issue.body ?? ""}`.toLowerCase();
+  if (labels.some((label) => ["rejected", "wontfix", "invalid", "duplicate"].includes(label)) || text.includes("reject")) return "rejected";
+  if (labels.some((label) => ["accepted", "resolved", "done", "fixed"].includes(label))) return "accepted";
+  if (issue.state === "closed") return "closed";
+  if (labels.some((label) => ["decision", "needs-decision", "rfc", "proposal"].includes(label))) return "decision";
+  if ((issue.assignees?.length ?? 0) === 0 && !issue.body) return "unanswered";
+  if (labels.length === 0 && (issue.assignees?.length ?? 0) === 0) return "unanswered";
+  return "discussing";
+}
+
+export function classifyPr(pr: PullRequest) {
+  const text = `${pr.title} ${pr.body ?? ""} ${(pr.files ?? []).map((file) => file.patch ?? file.filename).join(" ")}`.toLowerCase();
+  if (pr.state === "closed" && !pr.merged_at) return "rejected";
+  if (text.includes("conflict")) return "conflict";
+  if (pr.merged_at) return "done";
+  if (!pr.author) return "needsOwner";
+  return "reviewing";
+}
+
+export function matchesQuery(query: string, values: Array<string | null | undefined>) {
+  const normalizedQuery = query.trim().toLowerCase();
+  if (!normalizedQuery) return true;
+  return values.some((value) => value?.toLowerCase().includes(normalizedQuery));
+}
+
+export function matchesStatus(filter: string, value?: string | null) {
+  if (filter === "all") return true;
+  return value === filter;
+}
+
+export function matchesOwner(filter: string, people: string[]) {
+  const normalizedPeople = people.filter(Boolean);
+  if (filter === "all") return true;
+  if (filter === "unassigned") return normalizedPeople.length === 0;
+  return normalizedPeople.includes(filter);
+}
+
+export function matchesTime(filter: string, value?: string | null) {
+  if (filter === "all" || !value) return true;
+  const timestamp = new Date(value).getTime();
+  if (Number.isNaN(timestamp)) return true;
+  const days = filter === "7d" ? 7 : 30;
+  return Date.now() - timestamp <= days * 24 * 60 * 60 * 1000;
+}
+
+export function formatDate(value?: string | null) {
+  if (!value) return "无";
+  return new Date(value).toLocaleDateString("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit"
+  });
+}
+
+export function parseRepositoryInput(value: string): { owner: string; repo: string } | null {
+  const input = value.trim();
+  if (!input) return null;
+
+  let path = input;
+  const sshMatch = input.match(/^git@[^:]+:(.+)$/);
+  if (sshMatch) {
+    path = sshMatch[1];
+  } else {
+    try {
+      const url = new URL(input);
+      path = url.pathname;
+    } catch {
+      path = input;
+    }
+  }
+
+  const parts = path
+    .replace(/^\/+/, "")
+    .split("/")
+    .map((item) => item.trim())
+    .filter(Boolean);
+  if (parts.length < 2) return null;
+
+  const owner = parts[0];
+  const repo = parts[1].replace(/\.git$/i, "");
+  if (!owner || !repo) return null;
+  return { owner, repo };
+}
+
+export function getFriendlyError(error: unknown) {
+  const raw = error instanceof Error ? error.message : String(error);
+  if (raw === "Failed to fetch") {
+    return "无法访问后端 API。请确认后端服务已启动，并且 CORS 允许当前前端端口。";
+  }
+  try {
+    const parsed = JSON.parse(raw) as { detail?: unknown; message?: unknown };
+    if (typeof parsed.detail === "string") return parsed.detail;
+    if (typeof parsed.message === "string") return parsed.message;
+  } catch {
+    // 下面回退到原始错误消息。
+  }
+  return raw || "未知错误";
+}
+
+export type Issue = {
+  id: string;
+  number: number;
+  title: string;
+  state: string;
+  labels?: string[];
+  body?: string | null;
+  author?: string | null;
+  assignees?: string[];
+  created_at?: string | null;
+  updated_at?: string | null;
+};
+
+export type PRFile = {
+  id: string;
+  filename: string;
+  status: string;
+  additions: number;
+  deletions: number;
+  patch?: string | null;
+};
+
+export type PullRequest = {
+  id: string;
+  number: number;
+  title: string;
+  state: string;
+  body?: string | null;
+  author?: string | null;
+  base_branch?: string | null;
+  head_branch?: string | null;
+  merged_at?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+  files?: PRFile[];
+};
+
+export type WorkflowRun = {
+  id: string;
+  name: string;
+  status: string;
+  conclusion?: string | null;
+  html_url?: string | null;
+  logs_text?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+};
+
+export type WorkflowPlanClaim = {
+  target_type: string;
+  target_id?: string | null;
+  allowed_sources?: string[];
+  write_intent?: boolean;
+  reason?: string;
+};
+
+export type WorkflowPlanTask = {
+  id: string;
+  agent_name: string;
+  task_type: string;
+  objective: string;
+  dependencies?: string[];
+  claim: WorkflowPlanClaim;
+  critical?: boolean;
+};
+
+export type WorkflowPlan = {
+  workflow_id: string;
+  goal: string;
+  trigger_message: string;
+  acceptance_criteria?: string[];
+  tasks: WorkflowPlanTask[];
+  max_parallel_tasks?: number;
+  requires_human_confirmation?: boolean;
+  created_at?: string;
+};
+
+export type ChatResponse = {
+  route: string;
+  tool_calls: ToolCallTrace[];
+  agent_events?: Array<Record<string, unknown>>;
+  answer: string;
+  citations: Array<Record<string, string>>;
+  compression_stats?: Record<string, unknown>;
+  progressive_compaction?: Record<string, unknown>;
+  model_usage?: Array<Record<string, unknown>>;
+  context_diagnostics?: Record<string, unknown>;
+};
+
+export type ChatPlanResponse = {
+  route: string;
+  conversation_id: string;
+  answer: string;
+  plan: WorkflowPlan;
+  tool_calls: ToolCallTrace[];
+  agent_events?: Array<Record<string, unknown>>;
+};
+
+export type ChatStreamFinal = ChatResponse & {
+  run_id: string;
+  message_id: string;
+};
+
+export type ChatStreamDelta = {
+  content?: string;
+};
+
+export type ChatStreamToolUse = {
+  id?: string;
+  tool_name?: string;
+  arguments?: Record<string, unknown>;
+  skill_name?: string;
+  skill_title?: string;
+  skill_version?: string;
+  skill_steps?: string[];
+  skill_activation_mode?: string;
+  skill_activation_reason?: string;
+  skill_instruction_digest?: string;
+};
+
+export type ChatStreamToolResult = {
+  tool_use_id?: string;
+  tool_name?: string;
+  status?: string;
+  route?: string;
+  content?: unknown;
+  error?: string;
+  skill_name?: string;
+  skill_title?: string;
+  skill_version?: string;
+  skill_steps?: string[];
+  skill_activation_mode?: string;
+  skill_activation_reason?: string;
+  skill_instruction_digest?: string;
+};
+
+export type PromptRecommendationsResponse = {
+  agent: string;
+  suggestions: string[];
+};
+
+export type DuplicateCandidate = {
+  issue_id: string;
+  title: string;
+  score: number;
+};
+
+export type IssueEvidence = {
+  source_type: string;
+  title: string;
+  snippet: string;
+  reference?: string | null;
+  confidence?: number | null;
+};
+
+export type IssueDrafts = {
+  clarification_comment?: string | null;
+  task_breakdown?: string | null;
+};
+
+export type IssueAnalysisResult = {
+  summary: string;
+  conclusion: "进入开发" | "等待澄清" | "关闭" | "拆分" | "合并到已有 Issue" | string;
+  conclusion_reason: string;
+  category: string;
+  priority: "P0" | "P1" | "P2" | "P3" | string;
+  complexity: "S" | "M" | "L" | "XL" | string;
+  suggested_owner: string;
+  owner_reason: string;
+  duplicate_candidates?: DuplicateCandidate[];
+  evidence?: IssueEvidence[];
+  checklist?: string[];
+  action_items?: string[];
+  drafts?: IssueDrafts;
+  confidence: number;
+};
+
+export type IssueAnalysisResponse = {
+  analysis_id: string;
+  result: IssueAnalysisResult;
+};
+
+export type PRAnalysisResult = {
+  summary: string;
+  plan?: string[];
+  executed_steps?: string[];
+  merge_recommendation: "建议合入" | "修改后合入" | "暂缓" | "拒绝" | string;
+  recommendation_reason?: string;
+  key_changes?: string[];
+  risk_points?: string[];
+  blocking_issues?: string[];
+  review_checklist?: string[];
+  test_suggestions?: string[];
+  files_need_attention?: string[];
+  review_comments?: string[];
+  confidence: number;
+};
+
+export type PRAnalysisResponse = {
+  analysis_id: string;
+  result: PRAnalysisResult;
+};
+
+export type CIAnalysisResult = {
+  failure_summary: string;
+  failure_type: "test" | "build" | "lint" | "dependency" | "permission" | "environment" | "unknown" | string;
+  plan?: string[];
+  executed_steps?: string[];
+  first_error?: string | null;
+  root_cause?: string;
+  possible_causes?: string[];
+  fix_steps?: string[];
+  debug_steps?: string[];
+  related_files?: string[];
+  is_merge_blocking: boolean;
+  blocking_reason?: string;
+  confidence: number;
+};
+
+export type CIAnalysisResponse = {
+  analysis_id: string;
+  result: CIAnalysisResult;
+};
+
+export type IssueAnalysisTraceItem = {
+  id: string;
+  kind: "step" | "tool" | "thinking" | "result" | "error" | string;
+  title: string;
+  content: string;
+  status?: "running" | "done" | "error" | string;
+};
+
+export type ChatHistoryMessage = {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  route?: string | null;
+  tool_calls?: ToolCallTrace[];
+  agent_events?: Array<Record<string, unknown>>;
+  compression_stats?: Record<string, unknown>;
+  progressive_compaction?: Record<string, unknown>;
+  model_usage?: Array<Record<string, unknown>>;
+  context_diagnostics?: Record<string, unknown>;
+  created_at?: string | null;
+};
+
+export type RepoConnectResult = {
+  repo_id: string;
+  full_name: string;
+  provider: string;
+  api_base_url?: string | null;
+  clone_url?: string | null;
+  local_path?: string | null;
+  checkout_mode?: string;
+  default_branch?: string | null;
+  connected: boolean;
+  demo_mode: boolean;
+  message: string;
+  sync_status?: string;
+  synced?: Record<string, number>;
+};
+
+export type ProjectConversation = {
+  id: string;
+  repo_id: string;
+  title: string;
+  status: string;
+  message_count: number;
+  created_at?: string | null;
+  updated_at?: string | null;
+};
+
+export type ConversationDeleteResult = {
+  deleted: string;
+  active_conversation_id: string;
+  conversations: ProjectConversation[];
+};
+
+export type ChatMessage = {
+  id: string;
+  messageId?: string;
+  role: "user" | "assistant";
+  content: string;
+  route?: string;
+  toolCalls?: ToolCallTrace[];
+  traceItems?: ChatTraceItem[];
+  traceCollapsed?: boolean;
+  responsePending?: boolean;
+  compressionStats?: Record<string, unknown>;
+  progressiveCompaction?: Record<string, unknown>;
+  modelUsage?: Array<Record<string, unknown>>;
+  contextDiagnostics?: Record<string, unknown>;
+  contextCollapsed?: boolean;
+  workflowPlan?: WorkflowPlan;
+  planSourceMessage?: string;
+  planStatus?: "ready" | "executing" | "done" | "error";
+  feedback?: ChatFeedbackRecord;
+};
+
+export type ToolCallTrace = {
+  tool_name: string;
+  status: string;
+  error?: string;
+  tool_use_id?: string;
+  skill_name?: string;
+  skill_title?: string;
+  skill_version?: string;
+  skill_steps?: string[];
+  skill_activation_mode?: string;
+  skill_activation_reason?: string;
+  skill_instruction_digest?: string;
+};
+
+export type ChatTraceItem = {
+  id: string;
+  kind: "thinking" | "tool" | "error" | string;
+  title: string;
+  content: string;
+  status?: "running" | "done" | "error" | string;
+  toolUseId?: string;
+  skillName?: string;
+  skillTitle?: string;
+  skillVersion?: string;
+  skillSteps?: string[];
+  skillActivationMode?: string;
+  skillActivationReason?: string;
+  skillInstructionDigest?: string;
+  evidenceCount?: number;
+};
+
+export type SkillManifest = {
+  name: string;
+  title: string;
+  version: string;
+  description: string;
+  category: string;
+  entrypoint: string;
+  tools: string[];
+  input_modes: string[];
+  triggers: string[];
+  workflow_steps: string[];
+  output_contract: string;
+  safety_level: string;
+};
+
+export type SkillResponse = {
+  manifest: SkillManifest;
+  path: string;
+  instructions?: string | null;
+};
+
+export type McpRuntime = {
+  status: string;
+  server_name: string;
+  server_version: string;
+  protocol_version: string;
+  transport: string;
+  tools: Array<{
+    name: string;
+    description: string;
+    input_schema: {
+      required?: string[];
+      properties?: Record<string, unknown>;
+    };
+  }>;
+};
+
+export type WorkspaceSelection =
+  | { type: "issue"; id: string }
+  | { type: "pr"; id: string }
+  | { type: "ci"; id: string };
+
+export type WorkspaceItem = {
+  id: string;
+  title: string;
+  meta: string;
+  detail?: string | null;
+  badges?: string[];
+  selected: boolean;
+  onClick: () => void;
+};
+
+export type TeamMember = {
+  id: string;
+  name: string;
+  role: string;
+  strengths: string;
+  techStack: string;
+};
+
+export type TeamMemberDraft = Omit<TeamMember, "id">;
+
+export type MemoryNote = {
+  id: string;
+  title: string;
+  content: string;
+};
+
+export type MemoryNoteDraft = Omit<MemoryNote, "id">;
+
+export type KnowledgeItem = {
+  id: string;
+  document_ids: string[];
+  source_type: "memory_note" | "knowledge_file" | "team_member" | "weekly_report" | string;
+  title: string;
+  content_preview: string;
+  metadata?: Record<string, unknown>;
+  chunk_count: number;
+  created_at?: string | null;
+};
+
+export type ProjectIndexStatus = "missing" | "stale" | "building" | "ready" | "failed";
+
+export type ProjectIndexSummary = {
+  projectName?: string;
+  rootPath?: string;
+  techStack?: string[];
+  dirStructure?: string[];
+  docsList?: Array<{ path: string; tier: string; source_type?: string }>;
+  tierCoverage?: Record<string, number>;
+  sourceTypeCoverage?: Record<string, number>;
+  docsIndexed?: number;
+  indexPolicy?: {
+    mode?: "auto" | "allowlist";
+    include?: string[];
+    exclude?: string[];
+    includeManifests?: boolean;
+    configPath?: string | null;
+  };
+  excludedFiles?: number;
+  excludedPaths?: string[];
+  discoveryTruncated?: boolean;
+};
+
+export type ProjectIndexState = {
+  repo_id: string;
+  status: ProjectIndexStatus;
+  fingerprint: string;
+  docs_indexed: number;
+  docs_total: number;
+  error_message?: string | null;
+  summary_json?: ProjectIndexSummary | null;
+  snoozed_until?: string | null;
+  last_scan_at?: string | null;
+};
+
+export type RecallEvent = {
+  id: string;
+  tool_name: string;
+  query: string;
+  scope: string;
+  mode: string;
+  status: string;
+  result_count: number;
+  results: Array<Record<string, unknown>>;
+  citations: Array<Record<string, unknown>>;
+  metadata?: Record<string, unknown>;
+  created_at?: string | null;
+};
+
+export type MemoryStatus = {
+  repo_id: string;
+  index: Record<string, unknown>;
+  documents: Record<string, unknown>;
+  evidence: Record<string, unknown>;
+  recall: Record<string, unknown>;
+  candidates: Record<string, unknown>;
+  vector: Record<string, unknown>;
+};
+
+export type MemoryCandidate = {
+  id: string;
+  kind: string;
+  title: string;
+  content: string;
+  status: string;
+  source: string;
+  metadata?: Record<string, unknown>;
+  created_at?: string | null;
+  reviewed_at?: string | null;
+};
+
+export type MemorySearchResult = {
+  title: string;
+  source_type: string;
+  source_id: string;
+  snippet: string;
+  score?: number;
+  metadata?: Record<string, unknown>;
+  retrieval?: Record<string, unknown>;
+};
+
+export type KnowledgeGraphNode = {
+  id: string;
+  type: string;
+  title: string;
+  subtitle?: string;
+  metadata?: Record<string, unknown>;
+  highlighted?: boolean;
+};
+
+export type KnowledgeGraphEdge = {
+  id: string;
+  from_type: string;
+  from_id: string;
+  to_type: string;
+  to_id: string;
+  relation: string;
+  confidence: number;
+  source: string;
+  metadata?: Record<string, unknown>;
+};
+
+export type KnowledgeGraphResponse = {
+  repo_id: string;
+  center_type?: string | null;
+  center_id?: string | null;
+  depth: number;
+  nodes: KnowledgeGraphNode[];
+  edges: KnowledgeGraphEdge[];
+  stats: Record<string, unknown>;
+};
+
+export type AddProjectStatus = {
+  type: "success" | "error";
+  title: string;
+  detail?: string;
+};
+
+export type AddProjectSource = "remote" | "local";
+
+export type PromptSuggestionState = {
+  suggestions: string[];
+  exclude: string[];
+};
+export const workspaceTabs = ["Issue", "PR", "CI", "团队", "记忆&知识库", "技能&MCP", "图谱"] as const;
+export type WorkspaceTab = (typeof workspaceTabs)[number];
+
+export const DRAFT_CONVERSATION_PREFIX = "draft:";
+
+export function makeDraftConversationId(repoId: string) {
+  return `${DRAFT_CONVERSATION_PREFIX}${repoId}:${crypto.randomUUID()}`;
+}
+
+export function isDraftConversationId(value: string) {
+  return value.startsWith(DRAFT_CONVERSATION_PREFIX);
+}
+
+export function wait(ms: number) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+export function summarizeConversationTitle(text: string) {
+  const normalized = text.replace(/\s+/g, " ").trim();
+  const firstSentence = normalized.split(/[。！？!?.]/)[0]?.trim() || normalized;
+  const title = firstSentence || normalized || "新会话";
+  return title.length > 24 ? `${title.slice(0, 24)}...` : title;
+}
+
+export function compactJson(value: unknown, maxLength = 900) {
+  if (value === undefined || value === null) return "";
+  const text = typeof value === "string" ? value : JSON.stringify(value, null, 2);
+  if (!text) return "";
+  return text.length > maxLength ? `${text.slice(0, maxLength)}...` : text;
+}
+
+export function traceContentFromResult(content: unknown) {
+  if (content && typeof content === "object" && !Array.isArray(content)) {
+    const record = content as Record<string, unknown>;
+    if (typeof record.answer_preview === "string" && record.answer_preview.trim()) {
+      return record.answer_preview;
+    }
+  }
+  return compactJson(content);
+}
+
+export function makeToolUseTrace(data: ChatStreamToolUse, fallbackId: string): ChatTraceItem {
+  const toolName = data.tool_name || "tool";
+  const args = compactJson(data.arguments, 700);
+  return {
+    id: data.id || fallbackId,
+    kind: "tool",
+    title: `调用工具 ${toolName}`,
+    content: args ? `参数:\n${args}` : "正在执行...",
+    status: "running",
+    toolUseId: data.id,
+    skillName: data.skill_name,
+    skillTitle: data.skill_title,
+    skillVersion: data.skill_version,
+    skillSteps: data.skill_steps,
+    skillActivationMode: data.skill_activation_mode,
+    skillActivationReason: data.skill_activation_reason,
+    skillInstructionDigest: data.skill_instruction_digest
+  };
+}
+
+export function makeToolResultTrace(data: ChatStreamToolResult, fallbackId: string): ChatTraceItem {
+  const toolName = data.tool_name || "tool";
+  const failed = data.status === "error";
+  const content = data.error || traceContentFromResult(data.content) || data.route || "";
+  return {
+    id: data.tool_use_id || fallbackId,
+    kind: failed ? "error" : "tool",
+    title: `${failed ? "工具失败" : "工具完成"} ${toolName}`,
+    content,
+    status: failed ? "error" : "done",
+    toolUseId: data.tool_use_id,
+    skillName: data.skill_name,
+    skillTitle: data.skill_title,
+    skillVersion: data.skill_version,
+    skillSteps: data.skill_steps,
+    skillActivationMode: data.skill_activation_mode,
+    skillActivationReason: data.skill_activation_reason,
+    skillInstructionDigest: data.skill_instruction_digest
+  };
+}
+
+export function traceItemsFromAgentEvents(events: Array<Record<string, unknown>> = []): ChatTraceItem[] {
+  const items: ChatTraceItem[] = [];
+  events.forEach((event, index) => {
+    const type = String(event.type || "");
+    if (type === "skill_activated") {
+      const resources = Array.isArray(event.resources) ? event.resources.map((value) => contextRecord(value)) : [];
+      items.push({
+        id: `history-skill-activated-${index}`,
+        kind: "tool",
+        title: "Skill 已按需激活",
+        content: [
+          `方式：${contextString(event.activation_mode) || "unknown"}`,
+          contextString(event.activation_reason) ? `原因：${contextString(event.activation_reason)}` : "",
+          contextString(event.entrypoint) ? `入口：${contextString(event.entrypoint)}` : "",
+          contextString(event.instruction_digest) ? `指令摘要：${contextString(event.instruction_digest)}` : "",
+          resources.length ? `按需资源：${resources.map((resource) => contextString(resource.path)).filter(Boolean).join(", ")}` : ""
+        ].filter(Boolean).join("\n"),
+        status: "done",
+        skillName: contextString(event.skill_name),
+        skillTitle: contextString(event.skill_title),
+        skillVersion: contextString(event.skill_version),
+        skillSteps: Array.isArray(event.workflow_steps) ? event.workflow_steps.map(String) : [],
+        skillActivationMode: contextString(event.activation_mode),
+        skillActivationReason: contextString(event.activation_reason),
+        skillInstructionDigest: contextString(event.instruction_digest)
+      });
+      return;
+    }
+    if (type === "skill_validation") {
+      const status = contextString(event.status) || "not_executed";
+      const failed = status === "violated" || status === "failed";
+      const violations = Array.isArray(event.tool_contract_violations) ? event.tool_contract_violations.map(String) : [];
+      items.push({
+        id: `history-skill-validation-${index}`,
+        kind: failed ? "error" : "tool",
+        title: status === "violated" ? "Skill 契约校验失败" : status === "failed" ? "Skill 执行失败" : "Skill 运行校验",
+        content: [
+          `状态：${status}`,
+          `完整指令：${event.instructions_loaded === true ? "已加载" : "未加载"}`,
+          `步骤验证：${contextString(event.step_verification) || "unknown"}`,
+          Array.isArray(event.observed_tools) && event.observed_tools.length ? `观察到的工具：${event.observed_tools.map(String).join(", ")}` : "",
+          violations.length ? `越界工具：${violations.join(", ")}` : ""
+        ].filter(Boolean).join("\n"),
+        status: failed ? "error" : "done",
+        skillName: contextString(event.skill_name),
+        skillTitle: contextString(event.skill_title),
+        skillVersion: contextString(event.skill_version),
+        skillSteps: Array.isArray(event.declared_steps) ? event.declared_steps.map(String) : []
+      });
+      return;
+    }
+    if (type === "rag_strategy") {
+      const preRetrieval = contextRecord(event.pre_retrieval);
+      const reasoningRetrieval = contextRecord(event.reasoning_retrieval);
+      const enabled = preRetrieval.enabled === true;
+      const evidenceCount = contextNumber(preRetrieval.evidence_count);
+      const query = contextString(preRetrieval.query);
+      const sourceLines = Array.isArray(preRetrieval.sources)
+        ? preRetrieval.sources
+            .slice(0, 8)
+            .map((value) => contextRecord(value))
+            .map((source) => {
+              const title = contextString(source.title) || "未命名证据";
+              const sourceType = contextString(source.source_type) || "evidence";
+              return `- [${sourceType}] ${title}`;
+            })
+        : [];
+      items.push({
+        id: `history-rag-strategy-${index}`,
+        kind: "rag_prefetch",
+        title: "RAG 预检索",
+        content: [
+          `模式：${contextString(event.mode) === "hybrid_rag" ? "混合 RAG" : "工具调用"}`,
+          query ? `查询：${query}` : "",
+          `调用前检索：${enabled ? `已启用 · 命中 ${evidenceCount} 条证据` : "未启用"}`,
+          sourceLines.length ? `证据来源：\n${sourceLines.join("\n")}` : "",
+          `Agent 二次检索：${reasoningRetrieval.enabled === true ? "可用（支持查询改写与多次补查）" : "未启用"}`
+        ]
+          .filter(Boolean)
+          .join("\n"),
+        status: "done",
+        evidenceCount
+      });
+      return;
+    }
+    if (type === "thought" && typeof event.content === "string" && event.content.trim()) {
+      items.push({
+        id: `history-thought-${index}`,
+        kind: "thinking",
+        title: "公开思路",
+        content: event.content,
+        status: "done"
+      });
+      return;
+    }
+    if (type === "tool_use") {
+      items.push(
+        makeToolUseTrace(
+          {
+            id: typeof event.id === "string" ? event.id : `history-tool-${index}`,
+            tool_name: typeof event.tool_name === "string" ? event.tool_name : undefined,
+            arguments: event.arguments && typeof event.arguments === "object" ? (event.arguments as Record<string, unknown>) : undefined,
+            skill_name: typeof event.skill_name === "string" ? event.skill_name : undefined,
+            skill_title: typeof event.skill_title === "string" ? event.skill_title : undefined,
+            skill_version: typeof event.skill_version === "string" ? event.skill_version : undefined,
+            skill_steps: Array.isArray(event.skill_steps) ? event.skill_steps.map(String) : undefined,
+            skill_activation_mode: typeof event.skill_activation_mode === "string" ? event.skill_activation_mode : undefined,
+            skill_activation_reason: typeof event.skill_activation_reason === "string" ? event.skill_activation_reason : undefined,
+            skill_instruction_digest: typeof event.skill_instruction_digest === "string" ? event.skill_instruction_digest : undefined
+          },
+          `history-tool-${index}`
+        )
+      );
+      return;
+    }
+    if (type === "tool_result") {
+      const result = makeToolResultTrace(
+        {
+          tool_use_id: typeof event.tool_use_id === "string" ? event.tool_use_id : undefined,
+          tool_name: typeof event.tool_name === "string" ? event.tool_name : undefined,
+          status: typeof event.status === "string" ? event.status : undefined,
+          route: typeof event.route === "string" ? event.route : undefined,
+          content: event.content,
+          skill_name: typeof event.skill_name === "string" ? event.skill_name : undefined,
+          skill_title: typeof event.skill_title === "string" ? event.skill_title : undefined,
+          skill_version: typeof event.skill_version === "string" ? event.skill_version : undefined,
+          skill_steps: Array.isArray(event.skill_steps) ? event.skill_steps.map(String) : undefined,
+          skill_activation_mode: typeof event.skill_activation_mode === "string" ? event.skill_activation_mode : undefined,
+          skill_activation_reason: typeof event.skill_activation_reason === "string" ? event.skill_activation_reason : undefined,
+          skill_instruction_digest: typeof event.skill_instruction_digest === "string" ? event.skill_instruction_digest : undefined
+        },
+        `history-result-${index}`
+      );
+      const existingIndex = result.toolUseId ? items.findIndex((item) => item.toolUseId === result.toolUseId) : -1;
+      if (existingIndex >= 0) {
+        items[existingIndex] = { ...items[existingIndex], ...result, id: items[existingIndex].id };
+      } else {
+        items.push(result);
+      }
+      return;
+    }
+    if (type === "workflow_replan") {
+      const addedTasks = Array.isArray(event.added_tasks) ? event.added_tasks.map(String).filter(Boolean) : [];
+      items.push({
+        id: `history-workflow-replan-${index}`,
+        kind: "tool",
+        title: "Planner 重新规划",
+        content: [
+          typeof event.reason === "string" ? event.reason : "",
+          addedTasks.length ? `新增任务: ${addedTasks.join(", ")}` : ""
+        ]
+          .filter(Boolean)
+          .join("\n"),
+        status: "done"
+      });
+      return;
+    }
+    if (type === "workflow_task_result") {
+      const status = typeof event.status === "string" ? event.status : "done";
+      const failed = status === "error";
+      items.push({
+        id: `history-workflow-task-${index}`,
+        kind: failed ? "error" : "tool",
+        title: `${failed ? "任务失败" : "任务完成"} ${typeof event.task_type === "string" ? event.task_type : "workflow"}`,
+        content: typeof event.summary === "string" ? event.summary : "",
+        status: failed ? "error" : "done",
+        skillName: contextString(event.skill_name),
+        skillTitle: contextString(event.skill_title),
+        skillVersion: contextString(event.skill_version),
+        skillSteps: Array.isArray(event.skill_steps) ? event.skill_steps.map(String) : [],
+        skillActivationMode: contextString(event.skill_activation_mode),
+        skillActivationReason: contextString(event.skill_activation_reason),
+        skillInstructionDigest: contextString(event.skill_instruction_digest)
+      });
+      return;
+    }
+    if (type === "workflow_observer_result") {
+      const findings = Array.isArray(event.findings) ? event.findings.length : 0;
+      items.push({
+        id: `history-workflow-observer-${index}`,
+        kind: "thinking",
+        title: "Observer 检查",
+        content: `confidence=${event.overall_confidence ?? "-"}, findings=${findings}`,
+        status: "done"
+      });
+    }
+  });
+  return items;
+}
+
+export function finalizedTraceItems(
+  events: Array<Record<string, unknown>> | undefined,
+  fallback: ChatTraceItem[] | undefined
+) {
+  const finalized = traceItemsFromAgentEvents(events ?? []);
+  return finalized.length > 0 ? finalized : fallback ?? [];
+}
+
+export function formatRelativeTime(value?: string | null) {
+  if (!value) return "";
+  const timestamp = new Date(value).getTime();
+  if (Number.isNaN(timestamp)) return "";
+  const diffMs = Date.now() - timestamp;
+  const minute = 60 * 1000;
+  const hour = 60 * minute;
+  const day = 24 * hour;
+  if (diffMs < minute) return "刚刚";
+  if (diffMs < hour) return `${Math.floor(diffMs / minute)} 分钟`;
+  if (diffMs < day) return `${Math.floor(diffMs / hour)} 小时`;
+  return `${Math.floor(diffMs / day)} 天`;
+}
+
+export const issueCategoryMeta = [
+  { key: "unanswered", label: "未回复", color: "text-[#f47b5b]" },
+  { key: "discussing", label: "讨论中", color: "text-[#38a7f4]" },
+  { key: "decision", label: "待决策", color: "text-[#f08a00]" },
+  { key: "accepted", label: "已处理", color: "text-[#20a35b]" },
+  { key: "rejected", label: "已拒绝", color: "text-[#6b7280]" },
+  { key: "closed", label: "已关闭", color: "text-[#7c8794]" }
+] as const;
+
+export const prCategoryMeta = [
+  { key: "reviewing", label: "审核中", color: "text-[#38a7f4]" },
+  { key: "needsOwner", label: "需主审", color: "text-[#f08a00]" },
+  { key: "conflict", label: "有冲突", color: "text-[#f47b5b]" },
+  { key: "done", label: "已完成", color: "text-[#20a35b]" },
+  { key: "rejected", label: "已拒绝", color: "text-[#6b7280]" }
+] as const;
+
